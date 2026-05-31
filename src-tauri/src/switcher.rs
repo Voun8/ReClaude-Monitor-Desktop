@@ -307,7 +307,7 @@ const DAEMON_PORT_FALLBACK: u16 = 49154;
 
 /// 从 ~/.reclaude/state.json 读 daemon 端口。
 /// 优先 daemon.port（运行中），其次 last_port（已停时残留的上次值），兜底 49154。
-fn read_daemon_port(paths: &Paths) -> u16 {
+pub fn read_daemon_port(paths: &Paths) -> u16 {
     let raw = match fs::read_to_string(paths.reclaude_dir.join("state.json")) {
         Ok(s) => s,
         Err(_) => return DAEMON_PORT_FALLBACK,
@@ -379,6 +379,68 @@ fn set_secret_mode(p: &Path) {
 #[cfg(not(unix))]
 fn set_secret_mode(_p: &Path) {}
 
+// ===== macOS 设备签名私钥（Keychain）=====
+// reclaude 把设备 Ed25519 签名 seed 存在 macOS Keychain（service "Claude Code-device-key"，
+// account = 登录用户名），不在 device.json。换账号必须连这把 seed 一起换，否则 daemon 用旧
+// 账号的私钥去签新账号的请求，签名指纹不匹配 → 网关 502。这里在 save/use 时一并快照/还原。
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "Claude Code-device-key";
+
+#[cfg(target_os = "macos")]
+fn keychain_account() -> String {
+    std::env::var("USER").unwrap_or_default()
+}
+
+/// 从 Keychain 读出当前设备签名 seed（失败/被拒/不存在返回 None）。
+#[cfg(target_os = "macos")]
+fn read_device_seed() -> Option<String> {
+    let acct = keychain_account();
+    let out = Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            &acct,
+            "-w",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// 把 seed 写回 Keychain 的那个槽（-U：存在则更新）。必须在重启 daemon 之前调用。
+#[cfg(target_os = "macos")]
+fn write_device_seed(seed: &str) -> Result<(), String> {
+    let acct = keychain_account();
+    let status = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-U",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            &acct,
+            "-w",
+            seed,
+        ])
+        .status()
+        .map_err(|e| format!("写 Keychain seed 失败: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("security add-generic-password 写 seed 失败（Keychain 授权被拒？）".to_string())
+    }
+}
+
 /// 只杀"桌面 App"（路径在 .reclaude\claude-app 下），绝不动正在运行的 CLI claude。
 fn stop_claude_app(paths: &Paths) {
     use sysinfo::System;
@@ -394,6 +456,30 @@ fn stop_claude_app(paths: &Paths) {
             if exe_lower.starts_with(&prefix) {
                 process.kill();
             }
+        }
+    }
+}
+
+/// 强制回收所有残留的 reclaude daemon/_daemon 进程，避免每次切换越积越多。
+/// 仅匹配命令行里带 "daemon" 的 reclaude 进程：交互式 reclaude/claude 会话、
+/// 以及本监控 App 自身（命令行均无 daemon）都不会被误杀。
+fn stop_reclaude_daemons() {
+    use sysinfo::System;
+    let mut sys = System::new_all();
+    sys.refresh_all();
+    for (_pid, process) in sys.processes() {
+        let Some(exe) = process.exe() else {
+            continue;
+        };
+        if !exe.to_string_lossy().to_lowercase().contains("reclaude") {
+            continue;
+        }
+        let is_daemon = process
+            .cmd()
+            .iter()
+            .any(|a| a.to_string_lossy().to_lowercase().contains("daemon"));
+        if is_daemon {
+            process.kill();
         }
     }
 }
@@ -550,6 +636,16 @@ pub fn save_profile(
             .map_err(|e| format!("复制 device.key 失败: {e}"))?;
         set_secret_mode(&dev_key_dst);
     }
+    // macOS：device.key 不存在，签名私钥在 Keychain。把它一并快照进档案，
+    // 否则切回此档案时签名指纹不匹配 → 502。读不到（被拒/无项）则跳过。
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(seed) = read_device_seed() {
+            let seed_dst = dest.join("device.seed");
+            fs::write(&seed_dst, seed).map_err(|e| format!("写 device.seed 失败: {e}"))?;
+            set_secret_mode(&seed_dst);
+        }
+    }
     if paths.appdata_dir.exists() {
         // 镜像前先停桌面 App，避免拷到不一致的 SQLite/leveldb（导致后续切换时数据损坏）
         stop_claude_app(paths);
@@ -589,6 +685,10 @@ pub fn use_profile(paths: &Paths, name: &str, no_app: bool) -> Result<String, St
     if !wait_port_down(port_before, 2000) {
         return Err("daemon 未在 2s 内停止，请稍后重试切换。".to_string());
     }
+    // 3.5) 兜底回收历次切换残留的 daemon 进程：reclaude stop 只停"当前"那一个，
+    //      旧的 launcher / 孤儿进程从不被回收，会越积越多并占住端口/TUN 路由，
+    //      最终连新开的 claude 也连不上一个干净 daemon。
+    stop_reclaude_daemons();
 
     // 4) 写凭证
     fs::create_dir_all(&paths.reclaude_dir).map_err(|e| e.to_string())?;
@@ -599,6 +699,18 @@ pub fn use_profile(paths: &Paths, name: &str, no_app: bool) -> Result<String, St
     if k.exists() {
         fs::copy(k, &paths.device_key).map_err(|e| format!("写入 device.key 失败: {e}"))?;
         set_secret_mode(&paths.device_key);
+    }
+    // macOS：把档案里的签名 seed 写回 Keychain（必须在重启 daemon 之前），
+    // daemon 重启后才会加载到与新 device.json 匹配的私钥，避免签名指纹不匹配 502。
+    // 档案没存 seed（老档案未重存）则跳过——这种情况切过去仍会 502，需重新保存该档案。
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(seed) = fs::read_to_string(src.join("device.seed")) {
+            let seed = seed.trim();
+            if !seed.is_empty() {
+                write_device_seed(seed)?;
+            }
+        }
     }
 
     // 5) 恢复 App 会话（与 save 对称排除 CACHE/logs/Crashpad，否则 --delete 会把这些清空）

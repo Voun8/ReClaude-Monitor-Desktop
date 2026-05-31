@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-05-31
+
+聚焦账号热切换的可靠性:修复 macOS 上切换账号后 502 / 无限重试的核心问题,并新增固定端口转发器,让正在运行的 claude 会话在切换后能自愈。
+
+### 新增
+
+- **固定端口转发器**(`forwarder.rs`):App 内常驻线程绑定 `127.0.0.1:47600`,每个连接实时读 `state.json` 转发到 daemon 的当前端口。把会话代理指向这个固定端口(而非每次重启都变的 daemon 动态端口),切换账号后正在跑的会话只需重连一次即落到新 daemon —— 真正的热切换。需把启动器的 `HTTPS_PROXY` 指向 `127.0.0.1:47600`(转发器未运行时回退到动态端口,即原行为)。
+- **macOS 签名私钥(Keychain seed)配套切换**:`save_profile` 把 Keychain 里的设备 Ed25519 签名 seed 一并快照进 `<档案>/device.seed`;`use_profile` 切换时先把 seed 写回 Keychain(service `Claude Code-device-key`)再重启 daemon。
+
+### 修复
+
+- **macOS 切换账号后 502 / 无限重试**:根因是 macOS 上设备签名私钥存在 Keychain(而非 `device.key` 文件),原快照只换 `device.json`、漏了私钥 → daemon 用旧账号的钥匙去签新账号请求 → 网关验签失败。现已连 Keychain seed 一起切换。
+- **daemon 僵尸进程累积**:历次切换残留的 `reclaude daemon` 进程从不回收、会占住旧端口与路由,导致连新开的会话也连不上干净 daemon。`use_profile` 现在每次切换前回收所有残留 daemon(`stop_reclaude_daemons`)。
+
+### 已知约束
+
+- **对某账号重新 `reclaude login` 后,必须在 App 里重新保存该档案** —— login 会重新生成签名 seed,旧快照随之失效(切回去会 502)。
+- 转发器仅在 App 运行时提供;首次保存/切换会弹 macOS Keychain 授权框,点「始终允许」。
+- Windows 上签名私钥的存储位置(`device.key` 文件 vs 凭据管理器)尚未在真机确认;若为后者,Windows 切换需补对应实现。
+
 ## [1.0.0] - 2026-05-31
 
 首个公开版本。把 reclaude 用户日常的两件高频操作(账号切换、额度监控)合成一个干净的桌面 GUI,基于 Tauri 2 + SvelteKit。
@@ -76,4 +96,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[1.1.0]: https://github.com/Voun8/ReClaude-Monitor-Desktop/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Voun8/ReClaude-Monitor-Desktop/releases/tag/v1.0.0

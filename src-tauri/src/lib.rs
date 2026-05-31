@@ -1,3 +1,4 @@
+mod forwarder;
 mod monitor;
 mod switcher;
 mod tray_ring;
@@ -585,6 +586,8 @@ pub fn run() {
             tray_interval: AtomicU64::new(30),
         })
         .setup(|app| {
+            // 固定端口转发器：在 daemon 动态端口前架一个稳定代理端口，支撑账号热切换
+            forwarder::spawn();
             // 悬浮球 WebView 背景透明（macOS 下圆外四角才真正透明）
             if let Some(f) = app.get_webview_window("float") {
                 let _ = f.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
