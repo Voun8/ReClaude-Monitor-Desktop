@@ -257,6 +257,9 @@ fn alloc_from(a: &Value) -> Allocation {
     }
 }
 
+/// 按 RFC 3986 对 query 值做 percent-encoding（unreserved 集合外全部转义）。
+/// 与 `percent_encoding::utf8_percent_encode(s, NON_ALPHANUMERIC ∪ {-,_,.,~})` 等价；
+/// 此处自实现以省一个依赖。
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -400,11 +403,23 @@ fn parse_usage(v: &Value) -> UsageStats {
         .or_else(|| o.get("breakdown"));
     if let Some(arr) = m_src.and_then(|x| x.as_array()) {
         for it in arr {
+            // percent 字段语义按 key 名固化，避免单值启发（如 1.01 被误认为 0-1 范围）
+            //   percent / pct → 视为 0-100
+            //   share         → 视为 0-1，乘 100
+            let percent = if let Some(v) = num_at(it, "percent") {
+                v
+            } else if let Some(v) = num_at(it, "pct") {
+                v
+            } else if let Some(v) = num_at(it, "share") {
+                v * 100.0
+            } else {
+                0.0
+            };
             models.push(ModelUsage {
                 model: pick_str(it, &["model", "name"]),
                 total_usd: pick_num(it, &["total_usd", "total_cost"]).unwrap_or(0.0),
                 total_tokens: pick_num(it, &["total_tokens", "tokens", "value"]).unwrap_or(0.0),
-                percent: pick_num(it, &["percent", "pct", "share"]).unwrap_or(0.0),
+                percent,
             });
         }
     }

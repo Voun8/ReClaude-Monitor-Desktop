@@ -1,0 +1,80 @@
+name: Release
+
+# 推 v* tag 触发，产出 macOS + Windows 安装包并自动创建 Draft Release。
+# 手动也可触发（workflow_dispatch），方便测试构建是否过。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write  # tauri-action 需要写 Releases
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest      # Apple Silicon
+            args: '--target aarch64-apple-darwin'
+            rust-target: aarch64-apple-darwin
+          - platform: macos-13          # Intel
+            args: '--target x86_64-apple-darwin'
+            rust-target: x86_64-apple-darwin
+          - platform: windows-latest
+            args: ''
+            rust-target: ''
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # 从 CHANGELOG.md 提取最新版本块（第一个 `## [` 到第二个 `## [` 之间）作为 release body。
+      # awk 在 ubuntu/macos/Windows(Git Bash) runner 上都自带。
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        shell: bash
+        run: |
+          awk '/^## \[/{n++; if(n==2) exit} n==1 && !/^## \[/' CHANGELOG.md > /tmp/notes.md
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            cat /tmp/notes.md
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build & bundle
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Reclaude 控制台 ${{ github.ref_name }}'
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

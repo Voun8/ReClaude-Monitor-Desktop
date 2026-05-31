@@ -1,8 +1,8 @@
 [package]
 name = "reclaude-monitor"
-version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+version = "1.0.0"
+description = "Reclaude 控制台 - 账号热切换 + 拼车额度监控"
+authors = ["Voun8"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -18,10 +18,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-opener = "2"
+tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json"] }
 sysinfo = "0.33"
+tiny-skia = "0.11"
+ab_glyph = "0.2"
+tokio = { version = "1", features = ["time"] }
 

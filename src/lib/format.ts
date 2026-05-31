@@ -16,14 +16,15 @@ export function fmtUsd(v: number | null | undefined): string {
   return "$" + v.toFixed(2);
 }
 
-// 总用量这类需要更高精度：2~4 位小数（与 reclaude 面板一致）
+// 大额按货币惯例 2 位小数（$141.22）；小额（<$1）保留更高精度（最多 4 位，如 $0.0234）
 export function fmtUsd4(v: number | null | undefined): string {
   if (v === null || v === undefined) return "$--";
+  const maxFrac = Math.abs(v) >= 1 ? 2 : 4;
   return (
     "$" +
     v.toLocaleString("en-US", {
       minimumFractionDigits: 2,
-      maximumFractionDigits: 4,
+      maximumFractionDigits: maxFrac,
     })
   );
 }
@@ -53,11 +54,11 @@ export function fmtInt(v: number | null | undefined): string {
   return Math.round(v).toLocaleString("en-US");
 }
 
-// 753.07m / 1.20b 这种风格（小写后缀，跟 reclaude 面板一致）
+// 753.07M / 1.20B 这种风格（k=千 小写，M=百万 / B=十亿 大写，符合 SI 惯例）
 export function fmtTokens(v: number | null | undefined): string {
   if (v === null || v === undefined) return "-";
-  if (v >= 1e9) return (v / 1e9).toFixed(2) + "b";
-  if (v >= 1e6) return (v / 1e6).toFixed(2) + "m";
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
   if (v >= 1e3) return (v / 1e3).toFixed(2) + "k";
   return String(Math.round(v));
 }

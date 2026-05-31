@@ -131,4 +131,21 @@ export const api = {
   toggleFloat: () => invoke<boolean>("toggle_float"),
   hideFloat: () => invoke<void>("hide_float"),
   showMain: () => invoke<void>("show_main"),
+  minimizeToFloat: (size: number) =>
+    invoke<void>("minimize_to_float", { size }),
+  restoreFromFloat: () => invoke<void>("restore_from_float"),
+  resizeFloat: (size: number) => invoke<void>("resize_float", { size }),
+  showFloat: (size: number) => invoke<void>("show_float", { size }),
+  setTrayVisible: (visible: boolean) =>
+    invoke<void>("set_tray_visible", { visible }),
+  updateTrayIcon: (rgba: number[], size: number) =>
+    invoke<void>("update_tray_icon", { rgba, size }),
+  minimizeMain: () => invoke<void>("minimize_main"),
+  hideMain: () => invoke<void>("hide_main"),
+  quitApp: () => invoke<void>("quit_app"),
+  saveUiConfig: (mode: string, size: number, refreshSec?: number) =>
+    invoke<void>("save_ui_config", { mode, size, refreshSec: refreshSec ?? null }),
+  getRefreshSec: () => invoke<number | null>("get_refresh_sec"),
+  setTrayMode: (active: boolean, interval: number) =>
+    invoke<void>("set_tray_mode", { active, interval }),
 };

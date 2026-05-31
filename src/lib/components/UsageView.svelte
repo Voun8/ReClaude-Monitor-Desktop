@@ -3,16 +3,20 @@
   import { fmtInt, fmtTokens, fmtUsd4 } from "$lib/format";
   import Heatmap from "./Heatmap.svelte";
   import ActivityBars from "./ActivityBars.svelte";
-  import { RefreshCw, RotateCw, KeyRound, BarChart3, CalendarDays } from "@lucide/svelte";
+  import { RotateCw, KeyRound, BarChart3 } from "@lucide/svelte";
 
   let {
     cred,
+    reloadKey = 0,
     onConfigure,
-  }: { cred: MonitorCred | null; onConfigure: () => void } = $props();
+  }: {
+    cred: MonitorCred | null;
+    reloadKey?: number;
+    onConfigure: () => void;
+  } = $props();
 
-  type Range = "24h" | "7d" | "30d" | "all";
-  let range = $state<Range>("24h");
-  let pickedDate = $state(""); // YYYY-MM-DD，选某天
+  type Range = "7d" | "30d" | "all";
+  let range = $state<Range>("7d");
   let deviceId = $state("");
   let devices = $state<Device[]>([]);
   let stats = $state<UsageStats | null>(null);
@@ -21,7 +25,6 @@
   let error = $state<string | null>(null);
 
   const RANGES: { v: Range; t: string }[] = [
-    { v: "24h", t: "24 小时" },
     { v: "7d", t: "7 天" },
     { v: "30d", t: "30 天" },
     { v: "all", t: "全部" },
@@ -42,9 +45,10 @@
     ];
   });
 
+  // 后端已统一为 0-100，前端只做钳制
   function pct(p: number): number {
-    const v = p <= 1 ? p * 100 : p;
-    return Math.max(0, Math.min(100, v));
+    if (!Number.isFinite(p)) return 0;
+    return Math.max(0, Math.min(100, p));
   }
 
   function tsOf(s: string): number {
@@ -62,22 +66,19 @@
       .sort((a, b) => a.ts - b.ts),
   );
 
-  // 图表跟随上方：选了某天 → 只看那天；否则按 range 取时间窗
+  // 图表按 range 取时间窗
   const windowed = $derived.by(() => {
-    if (pickedDate) return sorted.filter((p) => p.date.slice(0, 10) === pickedDate);
     if (range === "all" || sorted.length === 0) return [];
-    const win = range === "24h" ? 864e5 : range === "7d" ? 7 * 864e5 : 30 * 864e5;
+    const win = range === "7d" ? 7 * 864e5 : 30 * 864e5;
     const maxTs = sorted[sorted.length - 1].ts;
     return sorted.filter((p) => p.ts > maxTs - win);
   });
 
-  const showHeatmap = $derived(!pickedDate && range === "all");
+  const showHeatmap = $derived(range === "all");
   const chartTitle = $derived(
-    pickedDate
-      ? `${pickedDate} · 活动`
-      : range === "all"
-        ? "活动 · 近一年"
-        : `活动趋势 · ${RANGES.find((r) => r.v === range)?.t ?? ""}`,
+    range === "all"
+      ? "活动 · 近一年"
+      : `活动趋势 · ${RANGES.find((r) => r.v === range)?.t ?? ""}`,
   );
 
   async function loadDevices() {
@@ -138,6 +139,17 @@
       loadStats();
     }
   });
+
+  // 父级头部刷新按钮触发（reloadKey 递增）→ 重新加载用量（跳过首次挂载）
+  let reloadSeen = false;
+  $effect(() => {
+    void reloadKey; // 跟踪 reloadKey 变化
+    if (!reloadSeen) {
+      reloadSeen = true;
+      return;
+    }
+    loadStats();
+  });
 </script>
 
 {#if !cred}
@@ -156,12 +168,9 @@
       {/each}
     </select>
     <div class="right">
-      <button class="sync" disabled={syncing} onclick={doSync} title="向 reclaude 重新拉取并重算用量">
+      <button class="sync" disabled={syncing} onclick={doSync} title="向 reclaude 服务器重新拉取并重算用量（较慢）">
         <RotateCw size={14} class={syncing ? "spin" : ""} />
-        <span>{syncing ? "同步中…" : "同步"}</span>
-      </button>
-      <button class="ref" class:spin={loading} onclick={loadStats} title="刷新" aria-label="刷新">
-        <RefreshCw size={15} />
+        <span>{syncing ? "重算中…" : "重算"}</span>
       </button>
     </div>
   </div>
@@ -169,14 +178,9 @@
   <div class="controls">
     <div class="seg">
       {#each RANGES as r (r.v)}
-        <button class:on={range === r.v && !pickedDate} onclick={() => { pickedDate = ""; range = r.v; }}>{r.t}</button>
+        <button class:on={range === r.v} onclick={() => (range = r.v)}>{r.t}</button>
       {/each}
     </div>
-    <label class="date" class:active={!!pickedDate}>
-      <CalendarDays size={14} />
-      <input type="date" bind:value={pickedDate} aria-label="选择日期" />
-      {#if pickedDate}<button class="clr" onclick={() => (pickedDate = "")} aria-label="清除日期">✕</button>{/if}
-    </label>
   </div>
 
   {#if error}
@@ -202,7 +206,7 @@
           <div class="muted">暂无活动数据</div>
         {/if}
       {:else}
-        <ActivityBars points={windowed} mode={range === "24h" && !pickedDate ? "hour" : "day"} />
+        <ActivityBars points={windowed} />
       {/if}
     </div>
 
@@ -273,18 +277,37 @@
     margin-bottom: 10px;
   }
   .dev {
-    max-width: 46%;
-    padding: 8px 10px;
-    border-radius: 10px;
-    background: var(--surface);
+    appearance: none;
+    -webkit-appearance: none;
+    max-width: 52%;
+    padding: 9px 32px 9px 13px;
+    border-radius: 11px;
+    background-color: var(--surface);
     color: var(--fg);
     border: 1px solid var(--border-strong);
     font-size: 12.5px;
+    font-weight: 600;
     outline: none;
     cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%239aa0ab' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 11px center;
+    transition:
+      border-color 0.15s ease,
+      background-color 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+  .dev:hover {
+    border-color: var(--accent);
+    background-color: var(--surface-2);
   }
   .dev:focus {
     border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .dev option {
+    background: var(--surface);
+    color: var(--fg);
   }
   .right {
     display: flex;
@@ -312,25 +335,7 @@
     opacity: 0.6;
     cursor: default;
   }
-  .ref {
-    width: 34px;
-    height: 34px;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--muted);
-    cursor: pointer;
-    display: grid;
-    place-items: center;
-  }
-  .ref:hover {
-    color: var(--accent);
-    border-color: var(--accent);
-  }
   :global(.spin) {
-    animation: spin 0.9s linear infinite;
-  }
-  .ref.spin :global(svg) {
     animation: spin 0.9s linear infinite;
   }
   @keyframes spin {
@@ -367,42 +372,6 @@
     background: var(--accent);
     color: #fff;
   }
-  .date {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 9px;
-    border-radius: 10px;
-    border: 1px solid var(--border-strong);
-    background: var(--surface);
-    color: var(--muted);
-    font-size: 12px;
-  }
-  .date.active {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .date input {
-    border: none;
-    background: transparent;
-    color: var(--fg);
-    font-size: 12px;
-    outline: none;
-    width: 116px;
-    color-scheme: dark light;
-  }
-  .clr {
-    border: none;
-    background: transparent;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 11px;
-    padding: 0 2px;
-  }
-  .clr:hover {
-    color: var(--err);
-  }
-
   .msg {
     text-align: center;
     color: var(--muted);

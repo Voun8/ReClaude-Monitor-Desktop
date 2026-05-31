@@ -15,6 +15,7 @@
   import Modal from "$lib/components/Modal.svelte";
   import UsageView from "$lib/components/UsageView.svelte";
   import FloatWidget from "$lib/components/FloatWidget.svelte";
+  import Logo from "$lib/components/Logo.svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import {
     RefreshCw,
@@ -25,6 +26,7 @@
     AlertTriangle,
     LogIn,
     PictureInPicture2,
+    Settings,
   } from "@lucide/svelte";
 
   function detectFloat(): boolean {
@@ -36,8 +38,38 @@
   }
   const isFloat = detectFloat();
 
-  const REFRESH_MS = 30_000;
   const FOLLOW_MS = 10_000;
+
+  // 设置项（持久化到 localStorage）
+  function lsNum(key: string, def: number, min: number, max: number): number {
+    try {
+      const v = Number(localStorage.getItem(key));
+      if (Number.isFinite(v) && v >= min && v <= max) return v;
+    } catch {
+      /* ignore */
+    }
+    return def;
+  }
+  function lsStr(key: string, def: string): string {
+    try {
+      const v = localStorage.getItem(key);
+      if (v) return v;
+    } catch {
+      /* ignore */
+    }
+    return def;
+  }
+  let refreshSec = $state(lsNum("refreshSec", 30, 5, 3600));
+  // 最小化方式：悬浮球 或 菜单栏圆环
+  let floatMode = $state<"ball" | "tray">(
+    lsStr("floatMode", "ball") === "tray" ? "tray" : "ball",
+  );
+  let floatSize = $state(lsNum("floatSize", 160, 30, 600));
+  // 关闭按钮行为：退出程序 或 后台运行
+  let closeAction = $state<"quit" | "background">(
+    lsStr("closeAction", "quit") === "background" ? "background" : "quit",
+  );
+  let usageReloadKey = $state(0); // 递增以触发用量页重新加载
 
   let env = $state<EnvInfo | null>(null);
   let currentEmail = $state<string | null>(null);
@@ -49,9 +81,11 @@
   let now = $state(Date.now());
   let busyName = $state<string | null>(null);
   let refreshing = $state(false);
-  let noApp = $state(false);
+  let noApp = $state(true);
   let lastUpdated = $state<number | null>(null);
-  let view = $state<"monitor" | "usage">("monitor");
+  let view = $state<"monitor" | "usage">(
+    lsStr("view", "monitor") === "usage" ? "usage" : "monitor",
+  );
 
   let toasts = $state<{ id: number; text: string; level: string }[]>([]);
   let toastSeq = 0;
@@ -61,7 +95,14 @@
     | { kind: "save"; name: string; incMon: boolean; email: string; password: string; orgId: string; busy: boolean }
     | { kind: "creds"; profileName: string | null; email: string; password: string; orgId: string; allocs: Allocation[] | null; detecting: boolean; busy: boolean }
     | { kind: "use"; profile: ProfileInfo }
-    | { kind: "remove"; profile: ProfileInfo; busy: boolean };
+    | { kind: "remove"; profile: ProfileInfo; busy: boolean }
+    | {
+        kind: "settings";
+        sec: number;
+        mode: "ball" | "tray";
+        size: number;
+        closeAct: "quit" | "background";
+      };
   let modal = $state<ModalState>(null);
 
   // ---- derived ----
@@ -186,33 +227,44 @@
 
   async function fetchAccountQuotas() {
     const targets = profiles.filter((p) => !isActiveEmail(p.email));
-    await Promise.all(
-      targets.map(async (p) => {
-        let c: MonitorCred | null = null;
+    // 限制并发，避免 N 个账号 × 多请求同时撞 reclaude.ai 触发限流
+    const MAX = 3;
+    for (let i = 0; i < targets.length; i += MAX) {
+      const batch = targets.slice(i, i + MAX);
+      await Promise.all(batch.map(fetchOneAccountQuota));
+    }
+  }
+
+  async function fetchOneAccountQuota(p: ProfileInfo) {
+    let c: MonitorCred | null = null;
+    try {
+      c = await api.getMonitorCred(p.email);
+    } catch {
+      c = null;
+    }
+    if (!c) return;
+    accountLoading[p.email] = true;
+    try {
+      const st = await api.accountStatus(c.email, c.password, c.orgId);
+      accountStatuses[p.email] = st;
+      if (st.orgId && st.orgId !== c.orgId && st.quota) {
         try {
-          c = await api.getMonitorCred(p.email);
-        } catch {
-          c = null;
-        }
-        if (!c) return;
-        accountLoading[p.email] = true;
-        try {
-          const st = await api.accountStatus(c.email, c.password, c.orgId);
-          accountStatuses[p.email] = st;
-          if (st.orgId && st.orgId !== c.orgId && st.quota) {
-            try {
-              await api.setMonitorCred({ ...c, orgId: st.orgId }, null);
-            } catch {
-              /* ignore */
-            }
-          }
+          await api.setMonitorCred({ ...c, orgId: st.orgId }, null);
         } catch {
           /* ignore */
-        } finally {
-          accountLoading[p.email] = false;
         }
-      }),
-    );
+      }
+    } catch (e) {
+      // 之前是静默吞掉，用户看不到原因；写入 error 状态后 errTextFor 会显示"获取失败"
+      accountStatuses[p.email] = {
+        quota: null,
+        orgId: c.orgId,
+        error: String(e),
+        badCredentials: false,
+      };
+    } finally {
+      accountLoading[p.email] = false;
+    }
   }
 
   async function refreshAll() {
@@ -296,6 +348,9 @@
     modal.busy = true;
     try {
       await api.removeProfile(p.name);
+      // 清理该 email 的缓存状态，避免删除后 accountStatuses/Loading 留下孤儿键
+      delete accountStatuses[p.email];
+      delete accountLoading[p.email];
       toast(`已删除档案 “${p.name}”`);
       modal = null;
       await loadProfiles();
@@ -387,22 +442,128 @@
   }
 
   // ---- lifecycle ----
-  let tickTimer: ReturnType<typeof setInterval>;
-  let refreshTimer: ReturnType<typeof setInterval>;
+  // tickTimer 仅在窗口可见时跑（每秒只为更新倒计时显示，隐藏时无人看，省电）
+  let tickTimer: ReturnType<typeof setInterval> | undefined;
   let followTimer: ReturnType<typeof setInterval>;
+  let unlistenClose: (() => void) | undefined;
+  // Svelte 5 注:onCloseRequested 的 closure 内 `closeAction === "background"` 是动态读取，
+  // 因为 $state 编译为 proxy getter——用户切了设置立刻生效，无需重绑 listener。
 
-  async function toggleFloat() {
+  function startTick() {
+    if (tickTimer) return;
+    now = Date.now();
+    tickTimer = setInterval(() => (now = Date.now()), 1000);
+  }
+  function stopTick() {
+    if (tickTimer) {
+      clearInterval(tickTimer);
+      tickTimer = undefined;
+    }
+  }
+  function onVisChange() {
+    if (document.hidden) stopTick();
+    else startTick();
+  }
+
+  // 最小化：按模式 → 悬浮球 或 菜单栏圆环（托盘常驻，仅最小化主窗口）
+  async function enterFloat() {
     try {
-      await api.toggleFloat();
+      if (floatMode === "tray") {
+        // 圆环模式：Rust 后台循环自己更新图标，这里只隐藏主窗口
+        await api.minimizeMain();
+      } else {
+        await api.minimizeToFloat(floatSize);
+      }
     } catch (e) {
       toast(String(e), "err");
     }
   }
 
+  // ---- 菜单栏圆环托盘（Rust 端自取数据 + tiny-skia 自绘）----
+  // 前端只切开关 + 传刷新间隔，圆环渲染/刷新全在 Rust 后台循环里完成（主窗口可全程隐藏）
+  async function applyTrayMode() {
+    try {
+      if (floatMode === "tray") {
+        await api.hideFloat(); // 与悬浮球互斥
+        await api.setTrayMode(true, refreshSec);
+      } else {
+        await api.setTrayMode(false, refreshSec);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // 头部刷新：按当前页刷新——监控页刷新额度/服务，用量页重载用量
+  function headerRefresh() {
+    if (view === "usage") usageReloadKey++;
+    else refreshAll();
+  }
+
+  function openSettings() {
+    modal = {
+      kind: "settings",
+      sec: refreshSec,
+      mode: floatMode,
+      size: floatSize,
+      closeAct: closeAction,
+    };
+  }
+  function setSec(s: number) {
+    if (modal?.kind === "settings") modal.sec = s;
+  }
+  function setMode(m: "ball" | "tray") {
+    if (modal?.kind === "settings") modal.mode = m;
+  }
+  function setCloseAct(a: "quit" | "background") {
+    if (modal?.kind === "settings") modal.closeAct = a;
+  }
+  function confirmSettings() {
+    if (modal?.kind !== "settings") return;
+    const sec = Math.round(modal.sec);
+    const size = Math.round(modal.size);
+    if (!Number.isFinite(sec) || sec < 5 || sec > 3600) {
+      toast("刷新间隔需在 5–3600 秒之间", "err");
+      return;
+    }
+    if (!Number.isFinite(size) || size < 30 || size > 600) {
+      toast("悬浮球大小需在 30–600 之间", "err");
+      return;
+    }
+    refreshSec = sec;
+    floatMode = modal.mode;
+    floatSize = size;
+    closeAction = modal.closeAct;
+    try {
+      localStorage.setItem("refreshSec", String(sec));
+      localStorage.setItem("floatMode", floatMode);
+      localStorage.setItem("floatSize", String(size));
+      localStorage.setItem("closeAction", closeAction);
+    } catch {
+      /* ignore */
+    }
+    // 若悬浮球当前可见，立即按新尺寸调整
+    api.resizeFloat(size).catch(() => {});
+    // 持久化供下次启动时 Rust 读取（并把 refreshSec 同步到 ui.json 供悬浮球读）
+    api.saveUiConfig(floatMode, floatSize, refreshSec).catch(() => {});
+    // 应用/切换菜单栏圆环显示
+    applyTrayMode();
+    modal = null;
+    toast("设置已保存");
+  }
+
   onMount(async () => {
     if (isFloat) return;
+    applyTrayMode();
+    // 圆环模式：本次 onMount 是 Rust 为渲染圆环而显示的主窗口 → 渲染后隐藏主窗口。
+    // 悬浮球模式：球已由 Rust 显示，主窗口全程隐藏，onMount 只在用户点开主窗口时运行，不隐藏。
+    if (floatMode === "tray") {
+      await api.hideMain();
+    }
+
     try {
-      noApp = localStorage.getItem("noApp") === "1";
+      const stored = localStorage.getItem("noApp");
+      if (stored !== null) noApp = stored === "1";
     } catch {
       /* ignore */
     }
@@ -412,23 +573,58 @@
       console.error(e);
     }
     await refreshAll();
-    tickTimer = setInterval(() => (now = Date.now()), 1000);
-    refreshTimer = setInterval(() => {
-      doRefresh();
-      fetchAccountQuotas();
-    }, REFRESH_MS);
+    startTick();
+    document.addEventListener("visibilitychange", onVisChange);
     followTimer = setInterval(follow, FOLLOW_MS);
+
+    // 关闭按钮：退出程序 或 后台运行
+    try {
+      unlistenClose = await getCurrentWindow().onCloseRequested((event) => {
+        if (closeAction === "background") {
+          event.preventDefault();
+          enterFloat();
+        } else {
+          api.quitApp();
+        }
+      });
+    } catch (e) {
+      console.error(e);
+    }
   });
 
   onDestroy(() => {
-    clearInterval(tickTimer);
-    clearInterval(refreshTimer);
+    stopTick();
     clearInterval(followTimer);
+    document.removeEventListener("visibilitychange", onVisChange);
+    unlistenClose?.();
   });
 
+  // 刷新定时器：随 refreshSec 变化重建
   $effect(() => {
+    if (isFloat) return;
+    const ms = Math.max(5, refreshSec) * 1000;
+    const t = setInterval(() => {
+      doRefresh();
+      fetchAccountQuotas();
+    }, ms);
+    return () => clearInterval(t);
+  });
+
+
+  $effect(() => {
+    if (isFloat) return;
     try {
       localStorage.setItem("noApp", noApp ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  });
+
+  // 持久化当前标签页（监控/用量）
+  $effect(() => {
+    if (isFloat) return;
+    try {
+      localStorage.setItem("view", view);
     } catch {
       /* ignore */
     }
@@ -441,14 +637,22 @@
 <div class="app">
   <header>
     <div class="brand">
-      <div class="logo">RC</div>
+      <div class="logo"><Logo size={38} /></div>
       <div class="t">Reclaude 控制台</div>
     </div>
     <div class="head-actions">
-      <button class="iconbtn" onclick={toggleFloat} title="悬浮球" aria-label="悬浮球">
+      <button class="iconbtn" onclick={openSettings} title="设置刷新间隔" aria-label="设置">
+        <Settings size={17} />
+      </button>
+      <button
+        class="iconbtn"
+        onclick={enterFloat}
+        title={floatMode === "tray" ? "最小化到菜单栏圆环" : "最小化为悬浮球"}
+        aria-label="最小化"
+      >
         <PictureInPicture2 size={17} />
       </button>
-      <button class="refresh" class:spin={refreshing} onclick={refreshAll} title="立即刷新" aria-label="立即刷新">
+      <button class="refresh" class:spin={refreshing && view !== "usage"} onclick={headerRefresh} title="刷新" aria-label="刷新">
         <RefreshCw size={17} />
       </button>
     </div>
@@ -457,7 +661,7 @@
   {#if env && !env.reclaudeFound}
     <div class="banner">
       <AlertTriangle size={15} />
-      <span>未找到 reclaude.exe，账号切换不可用（监控仍可用）。</span>
+      <span>未找到 reclaude，账号切换不可用（监控仍可用）。</span>
     </div>
   {/if}
 
@@ -467,7 +671,7 @@
   </nav>
 
   {#if view === "usage"}
-    <UsageView {cred} onConfigure={openCredsForCurrent} />
+    <UsageView {cred} reloadKey={usageReloadKey} onConfigure={openCredsForCurrent} />
   {:else}
   <!-- ======== HERO：当前账号 ======== -->
   <section class="hero">
@@ -659,6 +863,50 @@
       <button class="cancel" onclick={() => (modal = null)}>取消</button>
     </div>
   </Modal>
+{:else if modal?.kind === "settings"}
+  <Modal title="设置" onClose={() => (modal = null)}>
+    <div class="field">
+      <label for="s-sec">自动刷新间隔（秒）</label>
+      <input id="s-sec" type="number" min="5" max="3600" step="5" bind:value={modal.sec} />
+    </div>
+    <div class="presets">
+      {#each [10, 30, 60, 300] as s (s)}
+        <button class="preset" class:on={modal.sec === s} onclick={() => setSec(s)}>
+          {s < 60 ? `${s}s` : `${s / 60}m`}
+        </button>
+      {/each}
+    </div>
+    <p class="hint">额度与服务指标的自动刷新频率（5–3600 秒）。倒计时与跟随账号不受影响。</p>
+
+    <div class="field set-sep">
+      <div class="seg-title">最小化方式</div>
+      <div class="presets">
+        <button class="preset" class:on={modal.mode === "ball"} onclick={() => setMode("ball")}>悬浮球</button>
+        <button class="preset" class:on={modal.mode === "tray"} onclick={() => setMode("tray")}>菜单栏圆环</button>
+      </div>
+    </div>
+    {#if modal.mode === "ball"}
+      <div class="field">
+        <label for="s-size">悬浮球大小（px，正方形）</label>
+        <input id="s-size" type="number" min="30" max="600" step="10" bind:value={modal.size} />
+      </div>
+    {:else}
+      <p class="hint">菜单栏圆环显示「可用余额百分比」，点击图标打开主面板。</p>
+    {/if}
+
+    <div class="field set-sep">
+      <div class="seg-title">关闭窗口时</div>
+      <div class="presets">
+        <button class="preset" class:on={modal.closeAct === "quit"} onclick={() => setCloseAct("quit")}>退出程序</button>
+        <button class="preset" class:on={modal.closeAct === "background"} onclick={() => setCloseAct("background")}>后台运行</button>
+      </div>
+    </div>
+
+    <div class="modal-foot">
+      <button class="primary" onclick={confirmSettings}>保存</button>
+      <button class="cancel" onclick={() => (modal = null)}>取消</button>
+    </div>
+  </Modal>
 {/if}
 {/if}
 
@@ -667,6 +915,9 @@
     max-width: 480px;
     margin: 0 auto;
     padding: 16px 18px 26px;
+    height: 100vh;
+    overflow-y: auto;
+    box-sizing: border-box;
   }
   header {
     display: flex;
@@ -682,14 +933,8 @@
   .logo {
     width: 38px;
     height: 38px;
-    border-radius: 11px;
-    background: linear-gradient(140deg, var(--accent), #b85c40);
-    color: #fff;
-    font-weight: 800;
-    font-size: 14px;
     display: grid;
     place-items: center;
-    box-shadow: var(--shadow);
   }
   .brand .t {
     font-size: 16.5px;
@@ -1056,6 +1301,45 @@
   }
   .field input:focus {
     border-color: var(--accent);
+  }
+  .presets {
+    display: flex;
+    gap: 7px;
+    margin: 10px 0 2px;
+  }
+  .preset {
+    flex: 1;
+    padding: 7px 0;
+    border-radius: 9px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-2);
+    color: var(--muted);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition:
+      border-color 0.15s ease,
+      color 0.15s ease,
+      background 0.15s ease;
+  }
+  .preset:hover {
+    border-color: var(--accent);
+    color: var(--fg);
+  }
+  .preset.on {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .set-sep {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .seg-title {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 7px;
   }
   .cbox {
     display: flex;
