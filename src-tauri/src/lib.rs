@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use switcher::{EnvInfo, MonitorCred, Paths, ProfileInfo};
 use tauri::image::Image;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
@@ -497,6 +498,40 @@ fn tray_icon_size(app: &tauri::AppHandle) -> u32 {
     }
 }
 
+/// 拉一次当前账号余额并把圆环画进托盘图标；成功渲染返回 true，无凭证/额度或失败返回 false。
+/// 后台循环与「切到圆环模式」共用它——切换时立即渲染，不必等下一次循环 tick 或退避结束。
+async fn refresh_tray_icon(app: &tauri::AppHandle) -> bool {
+    let data: Option<(f64, (u8, u8, u8))> = async {
+        let paths = switcher::Paths::resolve().ok()?;
+        let email = switcher::current_email(&paths)?;
+        let cred = switcher::get_monitor_cred(&paths, &email)?;
+        let s = app.state::<AppState>();
+        let r = resolve_quota(&s, &cred.email, &cred.password, &cred.org_id).await;
+        let q = r.quota?;
+        if q.total_usd <= 0.0 {
+            return None;
+        }
+        let avail = (q.remaining_usd / q.total_usd * 100.0).clamp(0.0, 100.0);
+        Some((avail, tray_ring::color_for_ratio(q.ratio)))
+    }
+    .await;
+    let Some((avail, color)) = data else {
+        return false;
+    };
+    // 按当前 DPI 渲染成托盘真实显示尺寸 → 系统零缩放，无马赛克/毛边
+    let size = tray_icon_size(app);
+    let rgba = tray_ring::render_ring(avail, color, size);
+    if let Some(tray) = app.tray_by_id("ring") {
+        let _ = tray.set_icon(Some(Image::new_owned(rgba, size, size)));
+        // Windows：精确百分比放 tooltip，悬停可见（macOS 保持原静态 tooltip）
+        #[cfg(target_os = "windows")]
+        {
+            let _ = tray.set_tooltip(Some(format!("Reclaude 余额 {}%", avail.round() as u32)));
+        }
+    }
+    true
+}
+
 /// 切换菜单栏圆环模式：托盘显隐 + 后台循环开关。
 /// interval 是刷新间隔（秒），由前端传入（最小 5）。
 #[tauri::command]
@@ -508,8 +543,19 @@ fn set_tray_mode(
 ) -> Result<(), String> {
     state.tray_active.store(active, Ordering::Relaxed);
     state.tray_interval.store(interval.max(5), Ordering::Relaxed);
-    if let Some(tray) = app.tray_by_id("ring") {
-        let _ = tray.set_visible(active);
+    if active {
+        // 切到圆环模式时立刻渲染一次圆环，避免「切了但图标半天不变成圆环」：
+        // 之前只靠后台循环 tick + 首次登录，无缓存 cookie 时要等数秒，首登失败还会退避到 5 分钟。
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            refresh_tray_icon(&app).await;
+        });
+    } else if let (Some(icon), Some(tray)) =
+        (app.default_window_icon().cloned(), app.tray_by_id("ring"))
+    {
+        // 退出圆环模式：托盘常驻不隐藏，恢复成默认 reclaude 图标
+        let _ = tray.set_icon(Some(icon));
+        let _ = tray.set_tooltip(Some("Reclaude 控制台"));
     }
     Ok(())
 }
@@ -582,7 +628,22 @@ pub fn run() {
         .build()
         .expect("failed to build http client");
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // 单实例守卫（仅桌面，必须最先注册）：再次启动时把已有窗口拉到前台，
+    // 而不是再开一个进程——否则任务管理器里会堆出多个实例。
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(m) = app.get_webview_window("main") {
+                let _ = m.unminimize();
+                let _ = m.show();
+                let _ = m.set_focus();
+            }
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_opener::init())
         // 记住窗口位置（含悬浮球被拖到的位置），跨重启恢复
         .plugin(
@@ -604,8 +665,14 @@ pub fn run() {
             if let Some(f) = app.get_webview_window("float") {
                 let _ = f.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
             }
-            // 菜单栏圆环托盘：默认隐藏；点击图标 → 还原主窗口
+            // 系统托盘图标：常驻显示——任何模式（悬浮球 / 圆环 / 主窗口）都能从这里退出。
+            // 左键 → 还原主窗口；右键 → 菜单「打开主面板 / 退出程序」。
             let handle = app.handle().clone();
+            let open_item =
+                MenuItem::with_id(app, "tray_open_main", "打开主面板", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "tray_quit", "退出程序", true, None::<&str>)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let tray_menu = Menu::with_items(app, &[&open_item, &sep, &quit_item])?;
             let tray = TrayIconBuilder::with_id("ring")
                 .icon(
                     app.default_window_icon()
@@ -613,7 +680,21 @@ pub fn run() {
                         .expect("默认窗口图标缺失"),
                 )
                 .icon_as_template(false)
-                .tooltip("Reclaude 余额")
+                .tooltip("Reclaude 控制台")
+                .menu(&tray_menu)
+                // 左键不弹菜单（macOS 默认会弹）→ 保留左键还原主窗口、右键才弹菜单
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "tray_open_main" => {
+                        if let Some(m) = app.get_webview_window("main") {
+                            let _ = m.unminimize();
+                            let _ = m.show();
+                            let _ = m.set_focus();
+                        }
+                    }
+                    "tray_quit" => app.exit(0),
+                    _ => {}
+                })
                 .on_tray_icon_event(move |_tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -629,23 +710,33 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-            let _ = tray.set_visible(false);
+            let _ = tray.set_visible(true);
 
             // 启动按上次模式：圆环 → Rust 自取数据 + tiny-skia 自绘（主窗口全程隐藏、零闪烁）；
             // 悬浮球 → Rust 显示球（球用自己 webview 渲染）。
+            // 首次启动（无 ui.json，或主目录无法解析）：直接打开主窗口。
+            // 否则新用户只看到屏幕中央一个不在任务栏的小悬浮球，会误以为「没有任何界面」。
+            let first_run = ui_config_path().map(|p| !p.exists()).unwrap_or(true);
             let (mode, size) = read_ui_config();
-            {
-                let s = app.state::<AppState>();
-                if mode == "tray" {
-                    s.tray_active.store(true, Ordering::Relaxed);
-                    let _ = tray.set_visible(true);
+            if first_run {
+                if let Some(m) = app.get_webview_window("main") {
+                    let _ = m.show();
+                    let _ = m.set_focus();
                 }
-            }
-            if mode != "tray" {
-                if let Some(f) = app.get_webview_window("float") {
-                    set_float_size(&f, size);
-                    let _ = f.show();
-                    let _ = f.set_always_on_top(true);
+            } else {
+                {
+                    let s = app.state::<AppState>();
+                    if mode == "tray" {
+                        // 托盘常驻可见，这里只需开启后台圆环绘制
+                        s.tray_active.store(true, Ordering::Relaxed);
+                    }
+                }
+                if mode != "tray" {
+                    if let Some(f) = app.get_webview_window("float") {
+                        set_float_size(&f, size);
+                        let _ = f.show();
+                        let _ = f.set_always_on_top(true);
+                    }
                 }
             }
 
@@ -667,37 +758,8 @@ pub fn run() {
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         continue;
                     }
-                    let data: Option<(f64, (u8, u8, u8))> = async {
-                        let paths = switcher::Paths::resolve().ok()?;
-                        let email = switcher::current_email(&paths)?;
-                        let cred = switcher::get_monitor_cred(&paths, &email)?;
-                        let s = app_handle.state::<AppState>();
-                        let r = resolve_quota(&s, &cred.email, &cred.password, &cred.org_id).await;
-                        let q = r.quota?;
-                        if q.total_usd <= 0.0 {
-                            return None;
-                        }
-                        let avail = (q.remaining_usd / q.total_usd * 100.0).clamp(0.0, 100.0);
-                        Some((avail, tray_ring::color_for_ratio(q.ratio)))
-                    }
-                    .await;
-                    let sleep_secs = if let Some((avail, color)) = data {
+                    let sleep_secs = if refresh_tray_icon(&app_handle).await {
                         fail_count = 0;
-                        // 按当前 DPI 渲染成托盘真实显示尺寸 → 系统零缩放，无马赛克/毛边
-                        let size = tray_icon_size(&app_handle);
-                        let rgba = tray_ring::render_ring(avail, color, size);
-                        if let Some(tray) = app_handle.tray_by_id("ring") {
-                            let _ = tray
-                                .set_icon(Some(tauri::image::Image::new_owned(rgba, size, size)));
-                            // Windows：精确百分比放 tooltip，悬停可见（macOS 保持原静态 tooltip）
-                            #[cfg(target_os = "windows")]
-                            {
-                                let _ = tray.set_tooltip(Some(format!(
-                                    "Reclaude 余额 {}%",
-                                    avail.round() as u32
-                                )));
-                            }
-                        }
                         interval
                     } else {
                         fail_count = fail_count.saturating_add(1);

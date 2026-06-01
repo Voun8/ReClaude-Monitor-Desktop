@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { api, type MonitorSnapshot } from "$lib/api";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
 
   let snapshot = $state<MonitorSnapshot | null>(null);
   let status = $state<"loading" | "ok" | "nocred" | "error">("loading");
   let timer: ReturnType<typeof setInterval>;
+  let unlistenClose: (() => void) | undefined;
 
   async function load() {
     try {
@@ -56,17 +58,49 @@
     return "$" + v.toFixed(2);
   }
 
-  // 单击悬浮球 → 打开主面板（拖拽时不触发）
+  // 悬浮球：手动区分拖拽与点击。
+  // 不用 data-tauri-drag-region——它在 Windows 上 pointerdown 即进系统拖拽循环，
+  // 会吞掉 click 事件，导致「点好几次才打开主面板」。改为：移动超阈值才 startDragging，
+  // 未移动的 pointerup 判定为点击 → 打开主面板。
+  const appWindow = getCurrentWindow();
   let downX = 0;
   let downY = 0;
+  let pointerDown = false;
+  let dragging = false;
   function onDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    pointerDown = true;
+    dragging = false;
     downX = e.clientX;
     downY = e.clientY;
-  }
-  function onClick(e: MouseEvent) {
-    if (Math.hypot(e.clientX - downX, e.clientY - downY) <= 5) {
-      api.restoreFromFloat();
+    // 捕获指针：之后的 move/up 一律派发到 .bubble，避免指针掠过动画水波层或
+    // pointer-events:none 的透明环时 pointerup 落在别处 → 这次点击丢失（上半圆尤其常见）。
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
     }
+  }
+  async function onMove(e: PointerEvent) {
+    if (!pointerDown || dragging) return;
+    // 阈值放宽到 8px：点击时的轻微抖动不再被误判为拖拽（否则会触发 startDragging 把这次点击吃掉）。
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 8) {
+      dragging = true;
+      try {
+        await appWindow.startDragging();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  function onUp(e: PointerEvent) {
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    if (pointerDown && !dragging) api.restoreFromFloat();
+    pointerDown = false;
   }
   function onKey(e: KeyboardEvent) {
     if (e.key === "Enter" || e.key === " ") {
@@ -91,21 +125,39 @@
     }
     load();
     timer = setInterval(load, intervalMs);
+
+    // 关闭悬浮球窗口（如 Alt+F4）= 退出整个程序；否则只销毁球、主窗口仍隐藏，反而更难退出。
+    // 日常退出走系统托盘图标：右键 →「退出程序」。
+    try {
+      unlistenClose = await appWindow.onCloseRequested((event) => {
+        event.preventDefault();
+        api.quitApp();
+      });
+    } catch {
+      /* ignore */
+    }
   });
-  onDestroy(() => clearInterval(timer));
+  onDestroy(() => {
+    clearInterval(timer);
+    unlistenClose?.();
+  });
 </script>
 
 <div class="bubble-container">
   <div
     class="bubble {level}"
-    data-tauri-drag-region
     onpointerdown={onDown}
-    onclick={onClick}
+    onpointermove={onMove}
+    onpointerup={onUp}
     onkeydown={onKey}
     role="button"
     tabindex="0"
     title="点击打开主面板"
   >
+    <!-- 命中层：铺满整圆的独立合成层，统一接住整球点击。
+         透明窗口下静态球面的指针命中不稳定（之前只有带 transform 动画的波浪能点中，
+         水位以上没波浪的区域点不动）；本层用 translateZ(0) 提升为合成层，全圆都能响应。 -->
+    <div class="hit"></div>
     {#if status === "ok"}
       <div class="bubble-wave" style="--water-level:{waterTop}">
         <div class="wave wave1"></div>
@@ -196,6 +248,16 @@
       0 0 25px rgba(var(--c), 0.22),
       0 4px 15px rgba(0, 0, 0, 0.3),
       inset 0 1px 1px rgba(255, 255, 255, 0.05);
+  }
+
+  /* 命中层：铺满整圆 + translateZ(0) 独立合成层，保证整球都能接住点击（透明窗口下静态面命中不稳） */
+  .hit {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    border-radius: 50%;
+    transform: translateZ(0);
+    cursor: pointer;
   }
 
   /* 水波容器：top 即水面位置（用量越高越靠上） */
