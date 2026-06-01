@@ -386,8 +386,8 @@ fn set_float_size(f: &tauri::WebviewWindow, size: f64) {
     }
 }
 
-/// 最小化为悬浮球：按设置的尺寸调整悬浮球 + 显示（置顶）+ 最小化主窗口
-/// （Windows 即收进任务栏，macOS 收进 Dock）。
+/// 最小化为悬浮球：按设置的尺寸调整悬浮球 + 显示（置顶）+ 隐藏主窗口
+/// （hide 而非 minimize——minimize 在 Windows 会残留任务栏按钮，hide 才能彻底移出任务栏，只留悬浮球）。
 #[tauri::command]
 fn minimize_to_float(app: tauri::AppHandle, size: f64) -> Result<(), String> {
     if let Some(f) = app.get_webview_window("float") {
@@ -399,7 +399,7 @@ fn minimize_to_float(app: tauri::AppHandle, size: f64) -> Result<(), String> {
         let _ = f.set_focus();
     }
     if let Some(m) = app.get_webview_window("main") {
-        let _ = m.minimize();
+        let _ = m.hide();
     }
     Ok(())
 }
@@ -460,15 +460,6 @@ fn update_tray_icon(app: tauri::AppHandle, rgba: Vec<u8>, size: u32) -> Result<(
     Ok(())
 }
 
-/// 仅最小化主窗口（菜单栏圆环模式用：托盘常驻，最小化时不弹悬浮球）。
-#[tauri::command]
-fn minimize_main(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(m) = app.get_webview_window("main") {
-        let _ = m.minimize();
-    }
-    Ok(())
-}
-
 /// 隐藏主窗口（启动即进入指示器用：主窗口 webview 必须 visible 才会运行，
 /// 故启动时先可见、onMount 里尽早隐藏，只留悬浮球/圆环）。
 #[tauri::command]
@@ -483,6 +474,27 @@ fn hide_main(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+/// 托盘图标目标像素尺寸。
+/// Windows：按当前 DPI 渲染成通知区实际显示大小（16 逻辑像素 × scale），
+/// 系统零缩放 → 无马赛克/毛边。macOS/Linux：沿用原固定 44px（改动只针对 Windows）。
+fn tray_icon_size(app: &tauri::AppHandle) -> u32 {
+    #[cfg(target_os = "windows")]
+    {
+        let scale = app
+            .primary_monitor()
+            .ok()
+            .flatten()
+            .map(|m| m.scale_factor())
+            .unwrap_or(1.0);
+        ((16.0 * scale).round() as u32).clamp(16, 64)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        44
+    }
 }
 
 /// 切换菜单栏圆环模式：托盘显隐 + 后台循环开关。
@@ -671,13 +683,20 @@ pub fn run() {
                     .await;
                     let sleep_secs = if let Some((avail, color)) = data {
                         fail_count = 0;
-                        let rgba = tray_ring::render_ring(avail, color);
+                        // 按当前 DPI 渲染成托盘真实显示尺寸 → 系统零缩放，无马赛克/毛边
+                        let size = tray_icon_size(&app_handle);
+                        let rgba = tray_ring::render_ring(avail, color, size);
                         if let Some(tray) = app_handle.tray_by_id("ring") {
-                            let _ = tray.set_icon(Some(tauri::image::Image::new_owned(
-                                rgba,
-                                tray_ring::SIZE,
-                                tray_ring::SIZE,
-                            )));
+                            let _ = tray
+                                .set_icon(Some(tauri::image::Image::new_owned(rgba, size, size)));
+                            // Windows：精确百分比放 tooltip，悬停可见（macOS 保持原静态 tooltip）
+                            #[cfg(target_os = "windows")]
+                            {
+                                let _ = tray.set_tooltip(Some(format!(
+                                    "Reclaude 余额 {}%",
+                                    avail.round() as u32
+                                )));
+                            }
                         }
                         interval
                     } else {
@@ -715,7 +734,6 @@ pub fn run() {
             show_float,
             set_tray_visible,
             update_tray_icon,
-            minimize_main,
             hide_main,
             quit_app,
             save_ui_config,

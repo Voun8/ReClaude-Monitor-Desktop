@@ -140,7 +140,6 @@ export const api = {
     invoke<void>("set_tray_visible", { visible }),
   updateTrayIcon: (rgba: number[], size: number) =>
     invoke<void>("update_tray_icon", { rgba, size }),
-  minimizeMain: () => invoke<void>("minimize_main"),
   hideMain: () => invoke<void>("hide_main"),
   quitApp: () => invoke<void>("quit_app"),
   saveUiConfig: (mode: string, size: number, refreshSec?: number) =>

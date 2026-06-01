@@ -469,8 +469,8 @@
   async function enterFloat() {
     try {
       if (floatMode === "tray") {
-        // 圆环模式：Rust 后台循环自己更新图标，这里只隐藏主窗口
-        await api.minimizeMain();
+        // 圆环模式：Rust 后台循环自己更新图标，这里隐藏主窗口（移出任务栏，只留托盘圆环）
+        await api.hideMain();
       } else {
         await api.minimizeToFloat(floatSize);
       }
