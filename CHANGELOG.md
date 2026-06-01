@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-06-01
+
+Windows 体验修复:关闭按钮「后台运行」不再残留任务栏;菜单栏圆环指示器在小托盘下清晰可读。本次仅调整 Windows,macOS / Linux 行为不变。
+
+### 修复
+
+- **关闭按钮选「后台运行」仍残留任务栏**:根因是隐藏主窗口用的是 `minimize()`,而 Windows 上最小化会保留任务栏按钮。改为 `hide()` 彻底移出任务栏,只留悬浮球 / 托盘圆环;并删除与 `hide_main` 重复的 `minimize_main` 命令。
+
+### 优化
+
+- **菜单栏圆环托盘图标(仅 Windows)**:
+  - 按当前 DPI 1:1 渲染成通知区实际显示尺寸,消除系统二次缩放导致的马赛克 / 毛边;
+  - 圆环加细、内圈加大,中间百分比改用粗体 + 深色描边的大字号,深 / 浅色任务栏下都清晰可读;
+  - 悬停 tooltip 显示精确百分比。
+  - macOS / Linux 保持原渲染参数不变。
+
 ## [1.1.0] - 2026-05-31
 
 聚焦账号热切换的可靠性:修复 macOS 上切换账号后 502 / 无限重试的核心问题,并新增固定端口转发器,让正在运行的 claude 会话在切换后能自愈。
