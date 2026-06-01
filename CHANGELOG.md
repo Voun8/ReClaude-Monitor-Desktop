@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-06-01
+
+桌面端可用性集中修复:首次启动看不到界面、能开多个实例、悬浮球点不动、切圆环图标不刷新、最小化后无法退出;并修复 Release 在 macOS 上构建卡死。
+
+### 修复
+
+- **首次启动看不到任何界面**:无 `ui.json` 时直接显示主窗口。原来默认进悬浮球模式,新用户只看到屏幕中央一个不在任务栏的小球(透明窗口在部分 Win10 上还合成不出来),误以为「没有界面」。
+- **可重复打开多个实例**:新增单实例守卫(`tauri-plugin-single-instance`),再次启动时把已有窗口拉到前台,不再在任务管理器堆出多个进程。
+- **悬浮球点击不灵(尤其点上半部分 / 要点好几次才弹出)**:去掉 `data-tauri-drag-region`(Windows 上 pointerdown 即进系统拖拽循环、会吞掉 click),改为手动判定拖拽/点击 + 指针捕获 + 铺满整圆的独立合成命中层;透明窗口下整球都能稳定响应点击。
+- **切到菜单栏圆环后图标半天不变成圆环**:切换时立即渲染一次圆环,不必等后台循环 tick / 首次登录,也不会被失败退避拖到数分钟。
+
+### 新增
+
+- **系统托盘图标常驻 + 右键菜单**:托盘图标全程显示(圆环模式显示余额圆环,否则显示应用图标),左键打开主面板,右键弹出「打开主面板 / 退出程序」。悬浮球与圆环模式下都能从托盘彻底退出程序。
+
+### CI
+
+- **Release 构建去掉 macos-13(Intel)**:GitHub 正在淘汰 macos-13 runner,长时间分配不到机器导致构建卡在排队。改为在 `macos-latest` 上构建 universal 通用二进制(Intel + Apple Silicon 合一)。
+
 ## [1.1.1] - 2026-06-01
 
 Windows 体验修复:关闭按钮「后台运行」不再残留任务栏;菜单栏圆环指示器在小托盘下清晰可读。本次仅调整 Windows,macOS / Linux 行为不变。
