@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 变更
 
 - 默认 API 地址出现网络或服务不可用错误时，监控、额度、组织探测、用量统计会自动切换到 `https://www.recode.cat`。
+- 默认地址返回 `403 RBAC: access denied` 时也视为域名不可用并触发自动切换，避免地区访问限制被误判为账号密码错误。
 - Cookie 缓存按 API 根地址隔离，避免不同域名之间误用登录态。
 
 ## [1.1.2] - 2026-06-01

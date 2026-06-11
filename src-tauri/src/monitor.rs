@@ -11,6 +11,10 @@ fn api_url(api_base: &str, path: &str) -> String {
     format!("{api_base}{path}")
 }
 
+fn is_rbac_access_denied(body: &str) -> bool {
+    body.to_ascii_lowercase().contains("rbac: access denied")
+}
+
 #[derive(Debug)]
 pub enum MonErr {
     BadCredentials(String),
@@ -107,12 +111,18 @@ pub async fn login(
     let status = res.status();
     if !status.is_success() {
         let code = status.as_u16();
+        let body = res.text().await.unwrap_or_default();
+        if code == 403 && is_rbac_access_denied(&body) {
+            let snippet: String = body.chars().take(200).collect();
+            return Err(MonErr::Other(format!(
+                "API 访问被拒绝（HTTP 403）：{snippet}"
+            )));
+        }
         if matches!(code, 400 | 401 | 403 | 422) {
             return Err(MonErr::BadCredentials(format!(
                 "账号或密码错误（HTTP {code}）"
             )));
         }
-        let body = res.text().await.unwrap_or_default();
         let snippet: String = body.chars().take(200).collect();
         return Err(MonErr::Other(format!("登录失败 HTTP {code}: {snippet}")));
     }
@@ -152,11 +162,20 @@ async fn api_get(
         .await
         .map_err(|e| MonErr::Network(format!("网络错误：{e}")))?;
     let status = res.status();
-    if status.as_u16() == 401 || status.as_u16() == 403 {
-        return Err(MonErr::Auth(format!("auth-{}", status.as_u16())));
-    }
     if !status.is_success() {
-        return Err(MonErr::Other(format!("HTTP {}", status.as_u16())));
+        let code = status.as_u16();
+        let body = res.text().await.unwrap_or_default();
+        if code == 403 && is_rbac_access_denied(&body) {
+            let snippet: String = body.chars().take(200).collect();
+            return Err(MonErr::Other(format!(
+                "API 访问被拒绝（HTTP 403）：{snippet}"
+            )));
+        }
+        if code == 401 || code == 403 {
+            return Err(MonErr::Auth(format!("auth-{code}")));
+        }
+        let snippet: String = body.chars().take(200).collect();
+        return Err(MonErr::Other(format!("HTTP {code}: {snippet}")));
     }
     res.json::<Value>()
         .await
@@ -508,11 +527,20 @@ pub async fn sync_usage(
         .await
         .map_err(|e| MonErr::Network(format!("网络错误：{e}")))?;
     let s = res.status();
-    if s.as_u16() == 401 || s.as_u16() == 403 {
-        return Err(MonErr::Auth(format!("auth-{}", s.as_u16())));
-    }
     if !s.is_success() {
-        return Err(MonErr::Other(format!("HTTP {}", s.as_u16())));
+        let code = s.as_u16();
+        let body = res.text().await.unwrap_or_default();
+        if code == 403 && is_rbac_access_denied(&body) {
+            let snippet: String = body.chars().take(200).collect();
+            return Err(MonErr::Other(format!(
+                "API 访问被拒绝（HTTP 403）：{snippet}"
+            )));
+        }
+        if code == 401 || code == 403 {
+            return Err(MonErr::Auth(format!("auth-{code}")));
+        }
+        let snippet: String = body.chars().take(200).collect();
+        return Err(MonErr::Other(format!("HTTP {code}: {snippet}")));
     }
     Ok(())
 }
