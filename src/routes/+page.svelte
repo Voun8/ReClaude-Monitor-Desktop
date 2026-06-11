@@ -65,6 +65,7 @@
     lsStr("floatMode", "ball") === "tray" ? "tray" : "ball",
   );
   let floatSize = $state(lsNum("floatSize", 160, 30, 600));
+  let apiBase = $state(lsStr("apiBase", ""));
   // 关闭按钮行为：退出程序 或 后台运行
   let closeAction = $state<"quit" | "background">(
     lsStr("closeAction", "quit") === "background" ? "background" : "quit",
@@ -101,6 +102,7 @@
         sec: number;
         mode: "ball" | "tray";
         size: number;
+        apiBase: string;
         closeAct: "quit" | "background";
       };
   let modal = $state<ModalState>(null);
@@ -227,7 +229,7 @@
 
   async function fetchAccountQuotas() {
     const targets = profiles.filter((p) => !isActiveEmail(p.email));
-    // 限制并发，避免 N 个账号 × 多请求同时撞 reclaude.ai 触发限流
+    // 限制并发，避免 N 个账号 × 多请求同时撞 API 服务触发限流
     const MAX = 3;
     for (let i = 0; i < targets.length; i += MAX) {
       const batch = targets.slice(i, i + MAX);
@@ -506,6 +508,7 @@
       sec: refreshSec,
       mode: floatMode,
       size: floatSize,
+      apiBase,
       closeAct: closeAction,
     };
   }
@@ -518,10 +521,21 @@
   function setCloseAct(a: "quit" | "background") {
     if (modal?.kind === "settings") modal.closeAct = a;
   }
+  function normalizeApiBaseInput(raw: string): string | null {
+    const trimmed = raw.trim();
+    if (!trimmed) return "";
+    const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    try {
+      return new URL(withScheme).origin.replace(/\/+$/, "");
+    } catch {
+      return null;
+    }
+  }
   function confirmSettings() {
     if (modal?.kind !== "settings") return;
     const sec = Math.round(modal.sec);
     const size = Math.round(modal.size);
+    const nextApiBase = normalizeApiBaseInput(modal.apiBase);
     if (!Number.isFinite(sec) || sec < 5 || sec > 3600) {
       toast("刷新间隔需在 5–3600 秒之间", "err");
       return;
@@ -530,14 +544,22 @@
       toast("悬浮球大小需在 30–600 之间", "err");
       return;
     }
+    if (nextApiBase === null) {
+      toast("API 地址格式不正确", "err");
+      return;
+    }
+    const apiChanged = apiBase !== nextApiBase;
     refreshSec = sec;
     floatMode = modal.mode;
     floatSize = size;
+    apiBase = nextApiBase;
     closeAction = modal.closeAct;
     try {
       localStorage.setItem("refreshSec", String(sec));
       localStorage.setItem("floatMode", floatMode);
       localStorage.setItem("floatSize", String(size));
+      if (apiBase) localStorage.setItem("apiBase", apiBase);
+      else localStorage.removeItem("apiBase");
       localStorage.setItem("closeAction", closeAction);
     } catch {
       /* ignore */
@@ -545,15 +567,27 @@
     // 若悬浮球当前可见，立即按新尺寸调整
     api.resizeFloat(size).catch(() => {});
     // 持久化供下次启动时 Rust 读取（并把 refreshSec 同步到 ui.json 供悬浮球读）
-    api.saveUiConfig(floatMode, floatSize, refreshSec).catch(() => {});
+    api.saveUiConfig(floatMode, floatSize, refreshSec, apiBase).catch(() => {});
     // 应用/切换菜单栏圆环显示
     applyTrayMode();
     modal = null;
     toast("设置已保存");
+    if (apiChanged) {
+      usageReloadKey++;
+      void refreshAll();
+    }
   }
 
   onMount(async () => {
     if (isFloat) return;
+    try {
+      apiBase = await api.getApiBase();
+      if (apiBase) localStorage.setItem("apiBase", apiBase);
+      else localStorage.removeItem("apiBase");
+      await api.saveUiConfig(floatMode, floatSize, refreshSec, apiBase);
+    } catch {
+      /* ignore */
+    }
     applyTrayMode();
     // 圆环模式：本次 onMount 是 Rust 为渲染圆环而显示的主窗口 → 渲染后隐藏主窗口。
     // 悬浮球模式：球已由 Rust 显示，主窗口全程隐藏，onMount 只在用户点开主窗口时运行，不隐藏。
@@ -877,6 +911,12 @@
       {/each}
     </div>
     <p class="hint">额度与服务指标的自动刷新频率（5–3600 秒）。倒计时与跟随账号不受影响。</p>
+
+    <div class="field set-sep">
+      <label for="s-api">API 根地址</label>
+      <input id="s-api" type="text" placeholder="留空使用默认地址" bind:value={modal.apiBase} />
+    </div>
+    <p class="hint">留空优先使用 https://reclaude.ai；默认地址不可用时自动切换到 https://www.recode.cat。填写后仅使用该地址。</p>
 
     <div class="field set-sep">
       <div class="seg-title">最小化方式</div>

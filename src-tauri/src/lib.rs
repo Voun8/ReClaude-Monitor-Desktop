@@ -91,7 +91,7 @@ async fn remove_profile(name: String) -> Result<(), String> {
     .map_err(|e| format!("后台任务失败: {e}"))?
 }
 
-// ============ 监控（reclaude.ai）============
+// ============ 监控（可配置 API）============
 
 fn snapshot_err(org: String, msg: String, bad: bool) -> MonitorSnapshot {
     MonitorSnapshot {
@@ -103,8 +103,48 @@ fn snapshot_err(org: String, msg: String, bad: bool) -> MonitorSnapshot {
     }
 }
 
-async fn ensure_cookie(
+fn normalize_api_base(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+    Some(with_scheme.trim_end_matches('/').to_string())
+}
+
+fn configured_api_base() -> Option<String> {
+    let c = read_ui_config_raw();
+    c.api_base.as_deref().and_then(normalize_api_base)
+}
+
+fn monitor_api_bases() -> Vec<String> {
+    configured_api_base()
+        .map(|base| vec![base])
+        .unwrap_or_else(|| {
+            vec![
+                monitor::DEFAULT_API_BASE.to_string(),
+                monitor::FALLBACK_API_BASE.to_string(),
+            ]
+        })
+}
+
+fn should_fallback(api_base: &str, err: &MonErr) -> bool {
+    configured_api_base().is_none()
+        && api_base == monitor::DEFAULT_API_BASE
+        && !matches!(err, MonErr::BadCredentials(_) | MonErr::Auth(_))
+}
+
+fn cookie_key(api_base: &str, email: &str) -> String {
+    format!("{api_base}\n{email}")
+}
+
+async fn ensure_cookie_at(
     state: &AppState,
+    api_base: &str,
     email: &str,
     password: &str,
     force: bool,
@@ -112,19 +152,53 @@ async fn ensure_cookie(
     if !force {
         let cached = {
             let map = state.cookies.lock().unwrap();
-            map.get(email).cloned()
+            map.get(&cookie_key(api_base, email)).cloned()
         };
         if let Some(c) = cached {
             return Ok(c);
         }
     }
-    let c = monitor::login(&state.client, email, password).await?;
+    let c = monitor::login(&state.client, api_base, email, password).await?;
     state
         .cookies
         .lock()
         .unwrap()
-        .insert(email.to_string(), c.clone());
+        .insert(cookie_key(api_base, email), c.clone());
     Ok(c)
+}
+
+async fn ensure_cookie(
+    state: &AppState,
+    email: &str,
+    password: &str,
+    force: bool,
+) -> Result<(String, String), MonErr> {
+    let bases = monitor_api_bases();
+    let mut last_err: Option<MonErr> = None;
+    for api_base in bases {
+        match ensure_cookie_at(state, &api_base, email, password, force).await {
+            Ok(cookie) => return Ok((api_base, cookie)),
+            Err(e) if should_fallback(&api_base, &e) => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| MonErr::Other("没有可用 API 地址".to_string())))
+}
+
+async fn ensure_fallback_cookie(
+    state: &AppState,
+    email: &str,
+    password: &str,
+) -> Result<(String, String), MonErr> {
+    if configured_api_base().is_some() {
+        return Err(MonErr::Other("自定义 API 地址不可自动切换".to_string()));
+    }
+    let api_base = monitor::FALLBACK_API_BASE.to_string();
+    let cookie = ensure_cookie_at(state, &api_base, email, password, true).await?;
+    Ok((api_base, cookie))
 }
 
 struct Resolved {
@@ -133,62 +207,157 @@ struct Resolved {
     error: Option<String>,
     bad: bool,
     cookie: Option<String>,
+    api_base: Option<String>,
 }
 
 /// 登录（缓存 Cookie）→ 必要时自动探测 org_id → 拉取额度，带一次鉴权重登重试。
 /// 不含 metrics，供单账号卡片复用。
-async fn resolve_quota(
-    state: &AppState,
-    email: &str,
-    password: &str,
-    org_id: &str,
-) -> Resolved {
-    let mut cookie = match ensure_cookie(state, email, password, false).await {
-        Ok(c) => c,
+async fn resolve_quota(state: &AppState, email: &str, password: &str, org_id: &str) -> Resolved {
+    let (mut api_base, mut cookie) = match ensure_cookie(state, email, password, false).await {
+        Ok(session) => session,
         Err(MonErr::BadCredentials(m)) => {
-            return Resolved { quota: None, org_id: org_id.to_string(), error: Some(m), bad: true, cookie: None }
+            return Resolved {
+                quota: None,
+                org_id: org_id.to_string(),
+                error: Some(m),
+                bad: true,
+                cookie: None,
+                api_base: None,
+            }
         }
         Err(e) => {
-            return Resolved { quota: None, org_id: org_id.to_string(), error: Some(e.message()), bad: false, cookie: None }
+            return Resolved {
+                quota: None,
+                org_id: org_id.to_string(),
+                error: Some(e.message()),
+                bad: false,
+                cookie: None,
+                api_base: None,
+            }
         }
     };
 
     let mut org = org_id.trim().to_string();
     if org.is_empty() {
-        if let Ok(list) = monitor::list_allocations(&state.client, &cookie).await {
-            if let Some(first) = list.first() {
-                org = first.id.clone();
+        match monitor::list_allocations(&state.client, &api_base, &cookie).await {
+            Ok(list) => {
+                if let Some(first) = list.first() {
+                    org = first.id.clone();
+                }
             }
+            Err(e) if should_fallback(&api_base, &e) => {
+                if let Ok((fb_base, fb_cookie)) =
+                    ensure_fallback_cookie(state, email, password).await
+                {
+                    api_base = fb_base;
+                    cookie = fb_cookie;
+                    if let Ok(list) =
+                        monitor::list_allocations(&state.client, &api_base, &cookie).await
+                    {
+                        if let Some(first) = list.first() {
+                            org = first.id.clone();
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
         }
     }
 
     if org.is_empty() {
-        return Resolved { quota: None, org_id: org, error: None, bad: false, cookie: Some(cookie) };
+        return Resolved {
+            quota: None,
+            org_id: org,
+            error: None,
+            bad: false,
+            cookie: Some(cookie),
+            api_base: Some(api_base),
+        };
     }
 
     let mut attempt = 0;
+    let mut switched_to_fallback = false;
     loop {
         attempt += 1;
-        match monitor::fetch_quota(&state.client, &cookie, &org).await {
+        match monitor::fetch_quota(&state.client, &api_base, &cookie, &org).await {
             Ok(quota) => {
-                return Resolved { quota, org_id: org, error: None, bad: false, cookie: Some(cookie) }
+                return Resolved {
+                    quota,
+                    org_id: org,
+                    error: None,
+                    bad: false,
+                    cookie: Some(cookie),
+                    api_base: Some(api_base),
+                }
             }
             Err(MonErr::Auth(_)) if attempt < 2 => {
                 match ensure_cookie(state, email, password, true).await {
-                    Ok(c) => {
+                    Ok((base, c)) => {
+                        api_base = base;
                         cookie = c;
                         continue;
                     }
                     Err(MonErr::BadCredentials(m)) => {
-                        return Resolved { quota: None, org_id: org, error: Some(m), bad: true, cookie: None }
+                        return Resolved {
+                            quota: None,
+                            org_id: org,
+                            error: Some(m),
+                            bad: true,
+                            cookie: None,
+                            api_base: None,
+                        }
                     }
                     Err(e) => {
-                        return Resolved { quota: None, org_id: org, error: Some(e.message()), bad: false, cookie: None }
+                        return Resolved {
+                            quota: None,
+                            org_id: org,
+                            error: Some(e.message()),
+                            bad: false,
+                            cookie: None,
+                            api_base: None,
+                        }
+                    }
+                }
+            }
+            Err(e) if !switched_to_fallback && should_fallback(&api_base, &e) => {
+                switched_to_fallback = true;
+                match ensure_fallback_cookie(state, email, password).await {
+                    Ok((base, c)) => {
+                        api_base = base;
+                        cookie = c;
+                        continue;
+                    }
+                    Err(MonErr::BadCredentials(m)) => {
+                        return Resolved {
+                            quota: None,
+                            org_id: org,
+                            error: Some(m),
+                            bad: true,
+                            cookie: None,
+                            api_base: None,
+                        }
+                    }
+                    Err(e) => {
+                        return Resolved {
+                            quota: None,
+                            org_id: org,
+                            error: Some(e.message()),
+                            bad: false,
+                            cookie: None,
+                            api_base: None,
+                        }
                     }
                 }
             }
             Err(e) => {
-                return Resolved { quota: None, org_id: org, error: Some(e.message()), bad: false, cookie: Some(cookie) }
+                return Resolved {
+                    quota: None,
+                    org_id: org,
+                    error: Some(e.message()),
+                    bad: false,
+                    cookie: Some(cookie),
+                    api_base: Some(api_base),
+                }
             }
         }
     }
@@ -205,9 +374,11 @@ async fn refresh_monitor(
     if r.bad {
         return Ok(snapshot_err(r.org_id, r.error.unwrap_or_default(), true));
     }
-    let metrics = match &r.cookie {
-        Some(c) => monitor::fetch_metrics(&state.client, c).await.ok(),
-        None => None,
+    let metrics = match (&r.cookie, &r.api_base) {
+        (Some(c), Some(api_base)) => monitor::fetch_metrics(&state.client, api_base, c)
+            .await
+            .ok(),
+        _ => None,
     };
     Ok(MonitorSnapshot {
         quota: r.quota,
@@ -250,16 +421,24 @@ async fn list_allocations(
     password: String,
 ) -> Result<Vec<Allocation>, String> {
     let client = state.client.clone();
-    let cookie = ensure_cookie(&state, &email, &password, false)
+    let (api_base, cookie) = ensure_cookie(&state, &email, &password, false)
         .await
         .map_err(|e| e.message())?;
-    match monitor::list_allocations(&client, &cookie).await {
+    match monitor::list_allocations(&client, &api_base, &cookie).await {
         Ok(list) => Ok(list),
         Err(MonErr::Auth(_)) => {
-            let c = ensure_cookie(&state, &email, &password, true)
+            let (base, c) = ensure_cookie(&state, &email, &password, true)
                 .await
                 .map_err(|e| e.message())?;
-            monitor::list_allocations(&client, &c)
+            monitor::list_allocations(&client, &base, &c)
+                .await
+                .map_err(|e| e.message())
+        }
+        Err(e) if should_fallback(&api_base, &e) => {
+            let (base, c) = ensure_fallback_cookie(&state, &email, &password)
+                .await
+                .map_err(|e| e.message())?;
+            monitor::list_allocations(&client, &base, &c)
                 .await
                 .map_err(|e| e.message())
         }
@@ -273,16 +452,24 @@ async fn usage_devices(
     email: String,
     password: String,
 ) -> Result<Vec<monitor::Device>, String> {
-    let cookie = ensure_cookie(&state, &email, &password, false)
+    let (api_base, cookie) = ensure_cookie(&state, &email, &password, false)
         .await
         .map_err(|e| e.message())?;
-    match monitor::fetch_devices(&state.client, &cookie).await {
+    match monitor::fetch_devices(&state.client, &api_base, &cookie).await {
         Ok(d) => Ok(d),
         Err(MonErr::Auth(_)) => {
-            let c = ensure_cookie(&state, &email, &password, true)
+            let (base, c) = ensure_cookie(&state, &email, &password, true)
                 .await
                 .map_err(|e| e.message())?;
-            monitor::fetch_devices(&state.client, &c)
+            monitor::fetch_devices(&state.client, &base, &c)
+                .await
+                .map_err(|e| e.message())
+        }
+        Err(e) if should_fallback(&api_base, &e) => {
+            let (base, c) = ensure_fallback_cookie(&state, &email, &password)
+                .await
+                .map_err(|e| e.message())?;
+            monitor::fetch_devices(&state.client, &base, &c)
                 .await
                 .map_err(|e| e.message())
         }
@@ -296,16 +483,24 @@ async fn usage_sync(
     email: String,
     password: String,
 ) -> Result<(), String> {
-    let cookie = ensure_cookie(&state, &email, &password, false)
+    let (api_base, cookie) = ensure_cookie(&state, &email, &password, false)
         .await
         .map_err(|e| e.message())?;
-    match monitor::sync_usage(&state.client, &cookie).await {
+    match monitor::sync_usage(&state.client, &api_base, &cookie).await {
         Ok(()) => Ok(()),
         Err(MonErr::Auth(_)) => {
-            let c = ensure_cookie(&state, &email, &password, true)
+            let (base, c) = ensure_cookie(&state, &email, &password, true)
                 .await
                 .map_err(|e| e.message())?;
-            monitor::sync_usage(&state.client, &c)
+            monitor::sync_usage(&state.client, &base, &c)
+                .await
+                .map_err(|e| e.message())
+        }
+        Err(e) if should_fallback(&api_base, &e) => {
+            let (base, c) = ensure_fallback_cookie(&state, &email, &password)
+                .await
+                .map_err(|e| e.message())?;
+            monitor::sync_usage(&state.client, &base, &c)
                 .await
                 .map_err(|e| e.message())
         }
@@ -323,16 +518,25 @@ async fn usage_stats(
     org_id: String,
 ) -> Result<monitor::UsageStats, String> {
     let did = device_id.as_deref().filter(|s| !s.is_empty());
-    let cookie = ensure_cookie(&state, &email, &password, false)
+    let (api_base, cookie) = ensure_cookie(&state, &email, &password, false)
         .await
         .map_err(|e| e.message())?;
-    match monitor::fetch_usage_stats(&state.client, &cookie, &range, did, &org_id).await {
+    match monitor::fetch_usage_stats(&state.client, &api_base, &cookie, &range, did, &org_id).await
+    {
         Ok(s) => Ok(s),
         Err(MonErr::Auth(_)) => {
-            let c = ensure_cookie(&state, &email, &password, true)
+            let (base, c) = ensure_cookie(&state, &email, &password, true)
                 .await
                 .map_err(|e| e.message())?;
-            monitor::fetch_usage_stats(&state.client, &c, &range, did, &org_id)
+            monitor::fetch_usage_stats(&state.client, &base, &c, &range, did, &org_id)
+                .await
+                .map_err(|e| e.message())
+        }
+        Err(e) if should_fallback(&api_base, &e) => {
+            let (base, c) = ensure_fallback_cookie(&state, &email, &password)
+                .await
+                .map_err(|e| e.message())?;
+            monitor::fetch_usage_stats(&state.client, &base, &c, &range, did, &org_id)
                 .await
                 .map_err(|e| e.message())
         }
@@ -542,7 +746,9 @@ fn set_tray_mode(
     interval: u64,
 ) -> Result<(), String> {
     state.tray_active.store(active, Ordering::Relaxed);
-    state.tray_interval.store(interval.max(5), Ordering::Relaxed);
+    state
+        .tray_interval
+        .store(interval.max(5), Ordering::Relaxed);
     if active {
         // 切到圆环模式时立刻渲染一次圆环，避免「切了但图标半天不变成圆环」：
         // 之前只靠后台循环 tick + 首次登录，无缓存 cookie 时要等数秒，首登失败还会退避到 5 分钟。
@@ -569,6 +775,9 @@ struct UiConfig {
     /// 主面板设的刷新间隔（秒），供悬浮球启动时同步使用；None 表示沿用旧文件值
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_sec: Option<u64>,
+    /// 监控 API 根地址；None/空字符串表示使用默认地址并允许自动切备用域名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    api_base: Option<String>,
 }
 
 fn ui_config_path() -> Option<std::path::PathBuf> {
@@ -592,23 +801,38 @@ fn read_ui_config_raw() -> UiConfig {
 fn read_ui_config() -> (String, f64) {
     let c = read_ui_config_raw();
     let mode = if c.mode == "tray" { "tray" } else { "ball" }.to_string();
-    let size = if (30.0..=600.0).contains(&c.size) { c.size } else { 160.0 };
+    let size = if (30.0..=600.0).contains(&c.size) {
+        c.size
+    } else {
+        160.0
+    };
     (mode, size)
 }
 
 /// 前端在设置变化时调用，持久化供下次启动用。
 /// `refresh_sec` 传 None 时保留文件里的旧值（避免不传字段就丢失）。
 #[tauri::command]
-fn save_ui_config(mode: String, size: f64, refresh_sec: Option<u64>) -> Result<(), String> {
+fn save_ui_config(
+    mode: String,
+    size: f64,
+    refresh_sec: Option<u64>,
+    api_base: Option<String>,
+) -> Result<(), String> {
     let p = ui_config_path().ok_or_else(|| "找不到主目录".to_string())?;
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let merged_sec = refresh_sec.or_else(|| read_ui_config_raw().refresh_sec);
+    let old = read_ui_config_raw();
+    let merged_sec = refresh_sec.or(old.refresh_sec);
+    let merged_api_base = match api_base {
+        Some(v) => normalize_api_base(&v),
+        None => old.api_base.and_then(|v| normalize_api_base(&v)),
+    };
     let json = serde_json::to_string(&UiConfig {
         mode,
         size,
         refresh_sec: merged_sec,
+        api_base: merged_api_base,
     })
     .map_err(|e| e.to_string())?;
     std::fs::write(p, json).map_err(|e| e.to_string())
@@ -618,7 +842,17 @@ fn save_ui_config(mode: String, size: f64, refresh_sec: Option<u64>) -> Result<(
 #[tauri::command]
 fn get_refresh_sec() -> Option<u64> {
     let s = read_ui_config_raw().refresh_sec?;
-    if (5..=3600).contains(&s) { Some(s) } else { None }
+    if (5..=3600).contains(&s) {
+        Some(s)
+    } else {
+        None
+    }
+}
+
+/// 主面板设置弹窗读取上次保存的 API 地址；空值表示默认 + 自动备用。
+#[tauri::command]
+fn get_api_base() -> String {
+    configured_api_base().unwrap_or_default()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -741,7 +975,7 @@ pub fn run() {
             }
 
             // 后台循环：tray_active 时按 tray_interval 拉余额 → tiny-skia 画环 → set_icon
-            // 拉取失败（无凭证 / 网络错 / 鉴权失败）时指数退避到 5 分钟，避免高频撞 reclaude.ai 触发限流或封号
+            // 拉取失败（无凭证 / 网络错 / 鉴权失败）时指数退避到 5 分钟，避免高频撞 API 触发限流或封号
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut fail_count: u32 = 0;
@@ -800,6 +1034,7 @@ pub fn run() {
             quit_app,
             save_ui_config,
             get_refresh_sec,
+            get_api_base,
             set_tray_mode,
         ])
         .run(tauri::generate_context!())

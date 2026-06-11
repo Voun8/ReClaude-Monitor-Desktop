@@ -24,6 +24,7 @@
 - **多账号横向对比**：每个档案一行，并行拉取并显示各自余额（最多 3 并发，避免触发限流）
 - **后台自动跟随**：每 10s 同步当前 reclaude 登录账号，切换后 UI 立即跟上
 - **指数退避**：托盘后台循环遇到鉴权失败或网络错误时退避到 5 分钟，不会高频撞 API
+- **API 地址可配置**：设置里可填写 API 根地址；留空优先使用 `https://reclaude.ai`，默认地址不可用时自动切换到 `https://www.recode.cat`
 
 ### 用量统计
 - **KPI 卡片**：会话数 / 消息数 / 总用量（USD）/ 总 Tokens / 活跃天数 / 连续天数 / 常用模型
@@ -100,7 +101,7 @@ git push origin v1.0.0
 │                                                                       │
 │  switcher.rs   档案快照 / 热切换 / 端口探活 / 凭证 + 签名私钥管理       │
 │  forwarder.rs  固定端口转发器（47600 → daemon 当前端口，撑热切换）     │
-│  monitor.rs    reclaude.ai 登录 / 拼车额度 / 服务指标 / 用量统计       │
+│  monitor.rs    可配置 API 登录 / 拼车额度 / 服务指标 / 用量统计        │
 │  tray_ring.rs  tiny-skia 自绘菜单栏圆环（环 + 中央百分比 + alpha 混合）│
 │  lib.rs        Tauri 命令注册 + cookie 缓存 + 托盘后台循环（指数退避） │
 └──────────────────────────────┬────────────────────────────────────────┘
@@ -112,7 +113,7 @@ git push origin v1.0.0
               │                              │  + claude-app-data/ + monitor.json
               │ App forwarder → :47600       │  固定端口转发到当前 daemon（撑热切换）
               │ reclaude _daemon → dynamic   │  本地 HTTPS 中转代理 + 验签 device 身份
-              │ reclaude.ai                  │  拼车账户 / 用量 API
+              │ reclaude.ai / recode.cat     │  拼车账户 / 用量 API（可配置）
               └──────────────────────────────┘
 ```
 

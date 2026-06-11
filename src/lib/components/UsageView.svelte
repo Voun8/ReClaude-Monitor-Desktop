@@ -156,7 +156,7 @@
   <div class="need-cred">
     <KeyRound size={24} />
     <div class="nc-title">需要监控凭证</div>
-    <div class="nc-sub">用量统计要登录 reclaude.ai，请先为当前账号配置邮箱密码。</div>
+    <div class="nc-sub">用量统计需要登录 API 服务，请先为当前账号配置邮箱密码。</div>
     <button class="cta" onclick={onConfigure}><KeyRound size={15} /> 配置监控凭证</button>
   </div>
 {:else}

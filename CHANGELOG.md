@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### 新增
+
+- 设置弹窗新增 API 根地址输入框；留空时默认使用 `https://reclaude.ai`，填写后仅使用用户指定地址。
+
+### 变更
+
+- 默认 API 地址出现网络或服务不可用错误时，监控、额度、组织探测、用量统计会自动切换到 `https://www.recode.cat`。
+- Cookie 缓存按 API 根地址隔离，避免不同域名之间误用登录态。
+
 ## [1.1.2] - 2026-06-01
 
 桌面端可用性集中修复:首次启动看不到界面、能开多个实例、悬浮球点不动、切圆环图标不刷新、最小化后无法退出;并修复 Release 在 macOS 上构建卡死。

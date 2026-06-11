@@ -142,9 +142,10 @@ export const api = {
     invoke<void>("update_tray_icon", { rgba, size }),
   hideMain: () => invoke<void>("hide_main"),
   quitApp: () => invoke<void>("quit_app"),
-  saveUiConfig: (mode: string, size: number, refreshSec?: number) =>
-    invoke<void>("save_ui_config", { mode, size, refreshSec: refreshSec ?? null }),
+  saveUiConfig: (mode: string, size: number, refreshSec?: number, apiBase?: string) =>
+    invoke<void>("save_ui_config", { mode, size, refreshSec: refreshSec ?? null, apiBase: apiBase ?? null }),
   getRefreshSec: () => invoke<number | null>("get_refresh_sec"),
+  getApiBase: () => invoke<string>("get_api_base"),
   setTrayMode: (active: boolean, interval: number) =>
     invoke<void>("set_tray_mode", { active, interval }),
 };

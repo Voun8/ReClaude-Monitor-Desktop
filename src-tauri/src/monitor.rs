@@ -1,9 +1,15 @@
-// Port of reclaude-monitor 的 HTTP 部分：邮箱密码登录 reclaude.ai，拉取拼车额度与服务指标。
+// Port of reclaude-monitor 的 HTTP 部分：邮箱密码登录可配置 API，拉取拼车额度与服务指标。
 
 use serde::Serialize;
 use serde_json::Value;
 
+pub const DEFAULT_API_BASE: &str = "https://reclaude.ai";
+pub const FALLBACK_API_BASE: &str = "https://www.recode.cat";
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+
+fn api_url(api_base: &str, path: &str) -> String {
+    format!("{api_base}{path}")
+}
 
 #[derive(Debug)]
 pub enum MonErr {
@@ -80,13 +86,18 @@ fn num_at(v: &Value, key: &str) -> Option<f64> {
     v.get(key).and_then(num)
 }
 
-pub async fn login(client: &reqwest::Client, email: &str, password: &str) -> Result<String, MonErr> {
+pub async fn login(
+    client: &reqwest::Client,
+    api_base: &str,
+    email: &str,
+    password: &str,
+) -> Result<String, MonErr> {
     let res = client
-        .post("https://reclaude.ai/api/auth/login")
+        .post(api_url(api_base, "/api/auth/login"))
         .header("content-type", "application/json")
         .header("accept", "application/json")
-        .header("origin", "https://reclaude.ai")
-        .header("referer", "https://reclaude.ai/login")
+        .header("origin", api_base)
+        .header("referer", format!("{api_base}/login"))
         .header("user-agent", UA)
         .json(&serde_json::json!({ "email": email, "password": password }))
         .send()
@@ -97,7 +108,9 @@ pub async fn login(client: &reqwest::Client, email: &str, password: &str) -> Res
     if !status.is_success() {
         let code = status.as_u16();
         if matches!(code, 400 | 401 | 403 | 422) {
-            return Err(MonErr::BadCredentials(format!("账号或密码错误（HTTP {code}）")));
+            return Err(MonErr::BadCredentials(format!(
+                "账号或密码错误（HTTP {code}）"
+            )));
         }
         let body = res.text().await.unwrap_or_default();
         let snippet: String = body.chars().take(200).collect();
@@ -121,13 +134,18 @@ pub async fn login(client: &reqwest::Client, email: &str, password: &str) -> Res
     Ok(parts.join("; "))
 }
 
-async fn api_get(client: &reqwest::Client, url: &str, cookie: &str) -> Result<Value, MonErr> {
+async fn api_get(
+    client: &reqwest::Client,
+    api_base: &str,
+    url: &str,
+    cookie: &str,
+) -> Result<Value, MonErr> {
     let res = client
         .get(url)
         .header("accept", "*/*")
         .header("accept-language", "zh-CN,zh;q=0.9")
         .header("cookie", cookie)
-        .header("referer", "https://reclaude.ai/app")
+        .header("referer", format!("{api_base}/app"))
         .header("user-agent", UA)
         .header("x-lang", "zh")
         .send()
@@ -145,8 +163,18 @@ async fn api_get(client: &reqwest::Client, url: &str, cookie: &str) -> Result<Va
         .map_err(|e| MonErr::Other(format!("解析响应失败：{e}")))
 }
 
-pub async fn fetch_metrics(client: &reqwest::Client, cookie: &str) -> Result<MetricsOut, MonErr> {
-    let v = api_get(client, "https://reclaude.ai/api/app/ops/metrics", cookie).await?;
+pub async fn fetch_metrics(
+    client: &reqwest::Client,
+    api_base: &str,
+    cookie: &str,
+) -> Result<MetricsOut, MonErr> {
+    let v = api_get(
+        client,
+        api_base,
+        &api_url(api_base, "/api/app/ops/metrics"),
+        cookie,
+    )
+    .await?;
     let error_rate = num_at(&v, "error_rate").unwrap_or(0.0);
     let error_rate_pct = error_rate * 100.0;
     let state_level = if error_rate_pct < 1.0 {
@@ -175,24 +203,23 @@ pub async fn fetch_metrics(client: &reqwest::Client, cookie: &str) -> Result<Met
 
 pub async fn fetch_quota(
     client: &reqwest::Client,
+    api_base: &str,
     cookie: &str,
     org_id: &str,
 ) -> Result<Option<QuotaOut>, MonErr> {
     let url = format!(
-        "https://reclaude.ai/api/app/billing/carpool-quota?org_id={}",
+        "{}?org_id={}",
+        api_url(api_base, "/api/app/billing/carpool-quota"),
         urlencode(org_id)
     );
-    let v = api_get(client, &url, cookie).await?;
+    let v = api_get(client, api_base, &url, cookie).await?;
     let total = match num_at(&v, "quota_usd") {
         Some(x) => x,
         None => return Ok(None),
     };
     let used = num_at(&v, "used_usd").unwrap_or(0.0);
     let ratio = if total > 0.0 { used / total } else { 0.0 };
-    let enabled = v
-        .get("enabled")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(true);
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
     Ok(Some(QuotaOut {
         used_usd: used,
         total_usd: total,
@@ -206,11 +233,13 @@ pub async fn fetch_quota(
 
 pub async fn list_allocations(
     client: &reqwest::Client,
+    api_base: &str,
     cookie: &str,
 ) -> Result<Vec<Allocation>, MonErr> {
     let v = api_get(
         client,
-        "https://reclaude.ai/api/app/billing/carpool-allocations",
+        api_base,
+        &api_url(api_base, "/api/app/billing/carpool-allocations"),
         cookie,
     )
     .await?;
@@ -349,10 +378,7 @@ fn value_to_id(x: &Value) -> String {
 
 fn parse_usage(v: &Value) -> UsageStats {
     // 总览字段可能在顶层，也可能在 overview 子对象里
-    let o = v
-        .get("overview")
-        .filter(|x| x.is_object())
-        .unwrap_or(v);
+    let o = v.get("overview").filter(|x| x.is_object()).unwrap_or(v);
 
     let overview = UsageOverview {
         sessions: pick_num(o, &["sessions", "total_sessions", "session_count"]).unwrap_or(0.0),
@@ -386,7 +412,15 @@ fn parse_usage(v: &Value) -> UsageStats {
             };
             let count = pick_num(
                 it,
-                &["count", "value", "messages", "sessions", "total_usd", "total", "level"],
+                &[
+                    "count",
+                    "value",
+                    "messages",
+                    "sessions",
+                    "total_usd",
+                    "total",
+                    "level",
+                ],
             )
             .unwrap_or(0.0);
             if !date.is_empty() {
@@ -424,18 +458,24 @@ fn parse_usage(v: &Value) -> UsageStats {
         }
     }
 
-    UsageStats { overview, heatmap, models }
+    UsageStats {
+        overview,
+        heatmap,
+        models,
+    }
 }
 
 pub async fn fetch_usage_stats(
     client: &reqwest::Client,
+    api_base: &str,
     cookie: &str,
     range: &str,
     device_id: Option<&str>,
     org_id: &str,
 ) -> Result<UsageStats, MonErr> {
     let mut url = format!(
-        "https://reclaude.ai/api/app/usage/stats?range={}",
+        "{}?range={}",
+        api_url(api_base, "/api/app/usage/stats"),
         urlencode(range)
     );
     if let Some(d) = device_id {
@@ -446,18 +486,22 @@ pub async fn fetch_usage_stats(
     if !org_id.is_empty() {
         url.push_str(&format!("&org_id={}", urlencode(org_id)));
     }
-    let v = api_get(client, &url, cookie).await?;
+    let v = api_get(client, api_base, &url, cookie).await?;
     Ok(parse_usage(&v))
 }
 
 /// 触发服务端重算用量：POST /api/app/usage/stats（空 body）。
-pub async fn sync_usage(client: &reqwest::Client, cookie: &str) -> Result<(), MonErr> {
+pub async fn sync_usage(
+    client: &reqwest::Client,
+    api_base: &str,
+    cookie: &str,
+) -> Result<(), MonErr> {
     let res = client
-        .post("https://reclaude.ai/api/app/usage/stats")
+        .post(api_url(api_base, "/api/app/usage/stats"))
         .header("accept", "*/*")
         .header("accept-language", "zh-CN,zh;q=0.9")
         .header("cookie", cookie)
-        .header("referer", "https://reclaude.ai/app")
+        .header("referer", format!("{api_base}/app"))
         .header("user-agent", UA)
         .header("x-lang", "zh")
         .send()
@@ -475,9 +519,16 @@ pub async fn sync_usage(client: &reqwest::Client, cookie: &str) -> Result<(), Mo
 
 pub async fn fetch_devices(
     client: &reqwest::Client,
+    api_base: &str,
     cookie: &str,
 ) -> Result<Vec<Device>, MonErr> {
-    let v = api_get(client, "https://reclaude.ai/api/app/devices", cookie).await?;
+    let v = api_get(
+        client,
+        api_base,
+        &api_url(api_base, "/api/app/devices"),
+        cookie,
+    )
+    .await?;
     let arr = v
         .get("data")
         .and_then(|d| d.get("items"))
