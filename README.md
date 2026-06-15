@@ -1,6 +1,6 @@
 # Reclaude 控制台
 
-[![Version](https://img.shields.io/badge/version-1.1.4-blue.svg)](https://github.com/Voun8/ReClaude-Monitor-Desktop/releases)
+[![Version](https://img.shields.io/badge/version-1.1.5-blue.svg)](https://github.com/Voun8/ReClaude-Monitor-Desktop/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB.svg)](https://tauri.app)
 [![SvelteKit](https://img.shields.io/badge/SvelteKit-2-FF3E00.svg)](https://kit.svelte.dev)

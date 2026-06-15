@@ -1,6 +1,7 @@
 name: Release
 
-# 推 v* tag 触发，产出 macOS + Windows 安装包并自动创建 Draft Release。
+# 推 v* tag 触发，产出 macOS + Windows 安装包并自动创建公开 Release，
+# 同时同步 Gitee Release（需要配置 GitHub Secret：GITEE_TOKEN）。
 # 手动也可触发（workflow_dispatch），方便测试构建是否过。
 on:
   push:
@@ -74,6 +75,63 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'Reclaude 控制台 ${{ github.ref_name }}'
           releaseBody: ${{ steps.notes.outputs.body }}
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Upload bundle artifacts for Gitee
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitee-bundle-${{ matrix.platform }}
+          path: |
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.app.tar.gz
+          if-no-files-found: ignore
+
+  gitee-release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gitee-bundle-*
+          path: gitee-assets
+          merge-multiple: true
+
+      - name: List Gitee assets
+        shell: bash
+        run: find gitee-assets -type f -maxdepth 10 -print
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        shell: bash
+        run: |
+          awk '/^## \[/{n++; if(n==2) exit} n==1 && !/^## \[/' CHANGELOG.md > /tmp/notes.md
+          test -s /tmp/notes.md
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            cat /tmp/notes.md
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sync Gitee release
+        uses: nicennnnnnnlee/action-gitee-release@master
+        with:
+          gitee_action: create_release
+          gitee_owner: vvvon
+          gitee_repo: re-claude-monitor-desktop
+          gitee_token: ${{ secrets.GITEE_TOKEN }}
+          gitee_tag_name: ${{ github.ref_name }}
+          gitee_release_name: Reclaude 控制台 ${{ github.ref_name }}
+          gitee_release_body: ${{ steps.notes.outputs.body }}
+          gitee_target_commitish: ${{ github.sha }}
+          gitee_upload_retry_times: 3
+          gitee_files: gitee-assets/**/*
