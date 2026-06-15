@@ -3,8 +3,9 @@
 use serde::Serialize;
 use serde_json::Value;
 
-pub const DEFAULT_API_BASE: &str = "https://reclaude.ai";
-pub const FALLBACK_API_BASE: &str = "https://www.recode.cat";
+pub const DEFAULT_API_BASE: &str = "https://www.recode.cat";
+pub const FALLBACK_API_BASE: &str = "https://www.reclaude.ai";
+pub const LEGACY_API_BASE: &str = "https://reclaude.ai";
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
 fn api_url(api_base: &str, path: &str) -> String {
@@ -15,20 +16,29 @@ fn is_rbac_access_denied(body: &str) -> bool {
     body.to_ascii_lowercase().contains("rbac: access denied")
 }
 
+fn is_organization_access_denied(body: &str) -> bool {
+    body.to_ascii_lowercase()
+        .contains("organization access denied")
+}
+
 #[derive(Debug)]
 pub enum MonErr {
+    AccessDenied(String),
     BadCredentials(String),
     Auth(String),
     Network(String),
+    RateLimited(String),
     Other(String),
 }
 
 impl MonErr {
     pub fn message(&self) -> String {
         match self {
+            MonErr::AccessDenied(m) => m.clone(),
             MonErr::BadCredentials(m) => m.clone(),
             MonErr::Auth(m) => m.clone(),
             MonErr::Network(m) => m.clone(),
+            MonErr::RateLimited(m) => m.clone(),
             MonErr::Other(m) => m.clone(),
         }
     }
@@ -90,6 +100,31 @@ fn num_at(v: &Value, key: &str) -> Option<f64> {
     v.get(key).and_then(num)
 }
 
+fn rate_limit_error(code: u16, body: &str) -> MonErr {
+    let retry_after = serde_json::from_str::<Value>(body).ok().and_then(|v| {
+        num_at(&v, "retry_after_seconds")
+            .or_else(|| num_at(&v, "retryAfterSeconds"))
+            .or_else(|| num_at(&v, "retry_after"))
+            .or_else(|| {
+                v.get("detail").and_then(|detail| {
+                    num_at(detail, "retry_after_seconds")
+                        .or_else(|| num_at(detail, "retryAfterSeconds"))
+                        .or_else(|| num_at(detail, "retry_after"))
+                })
+            })
+    });
+    let message = match retry_after.filter(|seconds| *seconds > 0.0) {
+        Some(seconds) => {
+            format!(
+                "请求过于频繁（HTTP {code}），请约 {} 秒后再试",
+                seconds.ceil() as u64
+            )
+        }
+        _ => format!("请求过于频繁（HTTP {code}），请稍后再试"),
+    };
+    MonErr::RateLimited(message)
+}
+
 pub async fn login(
     client: &reqwest::Client,
     api_base: &str,
@@ -114,16 +149,25 @@ pub async fn login(
         let body = res.text().await.unwrap_or_default();
         if code == 403 && is_rbac_access_denied(&body) {
             let snippet: String = body.chars().take(200).collect();
-            return Err(MonErr::Other(format!(
+            eprintln!("login failed {api_base} HTTP {code}: {snippet}");
+            return Err(MonErr::AccessDenied(format!(
                 "API 访问被拒绝（HTTP 403）：{snippet}"
             )));
         }
+        if code == 429 {
+            let snippet: String = body.chars().take(200).collect();
+            eprintln!("login failed {api_base} HTTP {code}: {snippet}");
+            return Err(rate_limit_error(code, &body));
+        }
         if matches!(code, 400 | 401 | 403 | 422) {
+            let snippet: String = body.chars().take(200).collect();
+            eprintln!("login failed {api_base} HTTP {code}: {snippet}");
             return Err(MonErr::BadCredentials(format!(
                 "账号或密码错误（HTTP {code}）"
             )));
         }
         let snippet: String = body.chars().take(200).collect();
+        eprintln!("login failed {api_base} HTTP {code}: {snippet}");
         return Err(MonErr::Other(format!("登录失败 HTTP {code}: {snippet}")));
     }
 
@@ -144,39 +188,71 @@ pub async fn login(
     Ok(parts.join("; "))
 }
 
+/// 给 App 接口请求加公共头（cookie / UA / referer 等）。
+fn with_app_headers(
+    rb: reqwest::RequestBuilder,
+    api_base: &str,
+    cookie: &str,
+) -> reqwest::RequestBuilder {
+    rb.header("accept", "*/*")
+        .header("accept-language", "zh-CN,zh;q=0.9")
+        .header("cookie", cookie)
+        .header("referer", format!("{api_base}/app"))
+        .header("user-agent", UA)
+        .header("x-lang", "zh")
+}
+
+/// 把非 2xx 响应按状态码分类成 MonErr（RBAC 拒绝识别 + 正文截断 + 401/403 归为鉴权错）。
+async fn check_app_response(
+    res: reqwest::Response,
+    context: &str,
+) -> Result<reqwest::Response, MonErr> {
+    let status = res.status();
+    if status.is_success() {
+        return Ok(res);
+    }
+    let code = status.as_u16();
+    let body = res.text().await.unwrap_or_default();
+    if code == 403 && is_rbac_access_denied(&body) {
+        let snippet: String = body.chars().take(200).collect();
+        eprintln!("{context} failed HTTP {code}: {snippet}");
+        return Err(MonErr::AccessDenied(format!(
+            "API 访问被拒绝（HTTP 403）：{snippet}"
+        )));
+    }
+    if code == 403 && is_organization_access_denied(&body) {
+        let snippet: String = body.chars().take(200).collect();
+        eprintln!("{context} failed HTTP {code}: {snippet}");
+        return Err(MonErr::AccessDenied(format!(
+            "组织无访问权限（HTTP 403），请检查 org_id 是否属于当前账号：{snippet}"
+        )));
+    }
+    if code == 429 {
+        let snippet: String = body.chars().take(200).collect();
+        eprintln!("{context} failed HTTP {code}: {snippet}");
+        return Err(rate_limit_error(code, &body));
+    }
+    if code == 401 || code == 403 {
+        let snippet: String = body.chars().take(200).collect();
+        eprintln!("{context} failed HTTP {code}: {snippet}");
+        return Err(MonErr::Auth(format!("auth-{code}")));
+    }
+    let snippet: String = body.chars().take(200).collect();
+    eprintln!("{context} failed HTTP {code}: {snippet}");
+    Err(MonErr::Other(format!("HTTP {code}: {snippet}")))
+}
+
 async fn api_get(
     client: &reqwest::Client,
     api_base: &str,
     url: &str,
     cookie: &str,
 ) -> Result<Value, MonErr> {
-    let res = client
-        .get(url)
-        .header("accept", "*/*")
-        .header("accept-language", "zh-CN,zh;q=0.9")
-        .header("cookie", cookie)
-        .header("referer", format!("{api_base}/app"))
-        .header("user-agent", UA)
-        .header("x-lang", "zh")
+    let res = with_app_headers(client.get(url), api_base, cookie)
         .send()
         .await
         .map_err(|e| MonErr::Network(format!("网络错误：{e}")))?;
-    let status = res.status();
-    if !status.is_success() {
-        let code = status.as_u16();
-        let body = res.text().await.unwrap_or_default();
-        if code == 403 && is_rbac_access_denied(&body) {
-            let snippet: String = body.chars().take(200).collect();
-            return Err(MonErr::Other(format!(
-                "API 访问被拒绝（HTTP 403）：{snippet}"
-            )));
-        }
-        if code == 401 || code == 403 {
-            return Err(MonErr::Auth(format!("auth-{code}")));
-        }
-        let snippet: String = body.chars().take(200).collect();
-        return Err(MonErr::Other(format!("HTTP {code}: {snippet}")));
-    }
+    let res = check_app_response(res, url).await?;
     res.json::<Value>()
         .await
         .map_err(|e| MonErr::Other(format!("解析响应失败：{e}")))
@@ -515,33 +591,15 @@ pub async fn sync_usage(
     api_base: &str,
     cookie: &str,
 ) -> Result<(), MonErr> {
-    let res = client
-        .post(api_url(api_base, "/api/app/usage/stats"))
-        .header("accept", "*/*")
-        .header("accept-language", "zh-CN,zh;q=0.9")
-        .header("cookie", cookie)
-        .header("referer", format!("{api_base}/app"))
-        .header("user-agent", UA)
-        .header("x-lang", "zh")
-        .send()
-        .await
-        .map_err(|e| MonErr::Network(format!("网络错误：{e}")))?;
-    let s = res.status();
-    if !s.is_success() {
-        let code = s.as_u16();
-        let body = res.text().await.unwrap_or_default();
-        if code == 403 && is_rbac_access_denied(&body) {
-            let snippet: String = body.chars().take(200).collect();
-            return Err(MonErr::Other(format!(
-                "API 访问被拒绝（HTTP 403）：{snippet}"
-            )));
-        }
-        if code == 401 || code == 403 {
-            return Err(MonErr::Auth(format!("auth-{code}")));
-        }
-        let snippet: String = body.chars().take(200).collect();
-        return Err(MonErr::Other(format!("HTTP {code}: {snippet}")));
-    }
+    let res = with_app_headers(
+        client.post(api_url(api_base, "/api/app/usage/stats")),
+        api_base,
+        cookie,
+    )
+    .send()
+    .await
+    .map_err(|e| MonErr::Network(format!("网络错误：{e}")))?;
+    check_app_response(res, &api_url(api_base, "/api/app/usage/stats")).await?;
     Ok(())
 }
 

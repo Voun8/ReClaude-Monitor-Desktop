@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, type Device, type MonitorCred, type UsageStats } from "$lib/api";
-  import { fmtInt, fmtTokens, fmtUsd4 } from "$lib/format";
+  import { flexDate, fmtInt, fmtTokens, fmtUsd4 } from "$lib/format";
   import Heatmap from "./Heatmap.svelte";
   import ActivityBars from "./ActivityBars.svelte";
   import { RotateCw, KeyRound, BarChart3 } from "@lucide/svelte";
@@ -51,17 +51,9 @@
     return Math.max(0, Math.min(100, p));
   }
 
-  function tsOf(s: string): number {
-    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return new Date(s.slice(0, 19)).getTime();
-    const n = Number(s);
-    if (s.trim() !== "" && !Number.isNaN(n)) return n < 1e12 ? n * 1000 : n;
-    const d = new Date(s);
-    return Number.isNaN(d.getTime()) ? 0 : d.getTime();
-  }
-
   const sorted = $derived(
     (stats?.heatmap ?? [])
-      .map((c) => ({ date: c.date, value: c.count, ts: tsOf(c.date) }))
+      .map((c) => ({ ...c, ts: flexDate(c.date)?.getTime() ?? 0 }))
       .filter((p) => p.ts > 0)
       .sort((a, b) => a.ts - b.ts),
   );
@@ -85,7 +77,8 @@
     if (!cred) return;
     try {
       devices = await api.usageDevices(cred.email, cred.password);
-    } catch {
+    } catch (e) {
+      console.error(e);
       devices = [];
     }
   }
@@ -121,23 +114,16 @@
     }
   }
 
-  let devKey = "";
+  // 账号变化（含首次挂载）→ 重载设备列表与统计。
+  // cred 对象每轮 follow 都会重建，须按 email 判变，不能依赖对象引用。
+  // range / 设备切换属于本组件内的用户事件，在事件处理器里直接重载。
+  let credKey: string | null = null;
   $effect(() => {
     const k = cred ? cred.email : "";
-    if (k !== devKey) {
-      devKey = k;
-      loadDevices();
-    }
-  });
-
-  // cred / range / device 变化 → 重载（KPI 与图表都跟随）
-  let statKey = "";
-  $effect(() => {
-    const k = cred ? `${cred.email}|${range}|${deviceId}` : "";
-    if (k !== statKey) {
-      statKey = k;
-      loadStats();
-    }
+    if (k === credKey) return;
+    credKey = k;
+    loadDevices();
+    loadStats();
   });
 
   // 父级头部刷新按钮触发（reloadKey 递增）→ 重新加载用量（跳过首次挂载）
@@ -161,7 +147,15 @@
   </div>
 {:else}
   <div class="toolbar">
-    <select class="dev" bind:value={deviceId} aria-label="设备">
+    <select
+      class="dev"
+      value={deviceId}
+      onchange={(e) => {
+        deviceId = e.currentTarget.value;
+        loadStats();
+      }}
+      aria-label="设备"
+    >
       <option value="">全部设备</option>
       {#each devices as d (d.id)}
         <option value={d.id}>{d.name}</option>
@@ -178,7 +172,13 @@
   <div class="controls">
     <div class="seg">
       {#each RANGES as r (r.v)}
-        <button class:on={range === r.v} onclick={() => (range = r.v)}>{r.t}</button>
+        <button
+          class:on={range === r.v}
+          onclick={() => {
+            range = r.v;
+            loadStats();
+          }}>{r.t}</button
+        >
       {/each}
     </div>
   </div>

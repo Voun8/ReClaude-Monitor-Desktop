@@ -1,6 +1,6 @@
 # Reclaude 控制台
 
-[![Version](https://img.shields.io/badge/version-1.1.3-blue.svg)](https://github.com/Voun8/ReClaude-Monitor-Desktop/releases)
+[![Version](https://img.shields.io/badge/version-1.1.4-blue.svg)](https://github.com/Voun8/ReClaude-Monitor-Desktop/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB.svg)](https://tauri.app)
 [![SvelteKit](https://img.shields.io/badge/SvelteKit-2-FF3E00.svg)](https://kit.svelte.dev)
@@ -24,7 +24,7 @@
 - **多账号横向对比**：每个档案一行，并行拉取并显示各自余额（最多 3 并发，避免触发限流）
 - **后台自动跟随**：每 10s 同步当前 reclaude 登录账号，切换后 UI 立即跟上
 - **指数退避**：托盘后台循环遇到鉴权失败或网络错误时退避到 5 分钟，不会高频撞 API
-- **API 地址可配置**：设置里可填写 API 根地址；留空优先使用 `https://reclaude.ai`，默认地址不可用时自动切换到 `https://www.recode.cat`
+- **API 地址可配置**：设置里可填写 API 根地址；留空优先使用 `https://www.recode.cat`，不可用时依次切换到 `https://www.reclaude.ai`、`https://reclaude.ai`
 
 ### 用量统计
 - **KPI 卡片**：会话数 / 消息数 / 总用量（USD）/ 总 Tokens / 活跃天数 / 连续天数 / 常用模型

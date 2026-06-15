@@ -5,15 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-06-15
+
+### 修复
+
+- 桌面端 HTTP 请求显式沿用系统代理，避免浏览器可访问但 Rust 后端裸连触发 `403 RBAC: access denied`。
+- 监控接口默认优先使用 `https://www.recode.cat`，并保留 `https://www.reclaude.ai`、`https://reclaude.ai` 作为自动降级地址。
+- profile 监控凭证的 `orgId` 为空时，自动回填全局凭证中同邮箱保存的 `orgId`，避免空组织号触发错误探测。
+- 明确区分 `429 rate_limited`、RBAC 拒绝和组织无权限 `403`，避免把服务端限流或组织权限问题误判为普通密码错误。
+
 ## [1.1.3] - 2026-06-11
 
 ### 新增
 
-- 设置弹窗新增 API 根地址输入框；留空时默认使用 `https://reclaude.ai`，填写后仅使用用户指定地址。
+- 设置弹窗新增 API 根地址输入框；留空时默认使用 `https://www.recode.cat`，填写后仅使用用户指定地址。
 
 ### 变更
 
-- 默认 API 地址出现网络或服务不可用错误时，监控、额度、组织探测、用量统计会自动切换到 `https://www.recode.cat`。
+- 默认 API 地址出现网络或服务不可用错误时，监控、额度、组织探测、用量统计会依次切换到 `https://www.reclaude.ai`、`https://reclaude.ai`。
 - 默认地址返回 `403 RBAC: access denied` 时也视为域名不可用并触发自动切换，避免地区访问限制被误判为账号密码错误。
 - Cookie 缓存按 API 根地址隔离，避免不同域名之间误用登录态。
 

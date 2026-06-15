@@ -159,10 +159,10 @@ pub fn render_ring(avail: f64, color_rgb: (u8, u8, u8), size: u32) -> Vec<u8> {
                         }
                         let i = (py * stride + px * 4) as usize;
                         let inv = 1.0 - af;
-                        data[i]     = ($cr as f32 * af + data[i]     as f32 * inv).min(255.0) as u8;
+                        data[i] = ($cr as f32 * af + data[i] as f32 * inv).min(255.0) as u8;
                         data[i + 1] = ($cg as f32 * af + data[i + 1] as f32 * inv).min(255.0) as u8;
                         data[i + 2] = ($cb as f32 * af + data[i + 2] as f32 * inv).min(255.0) as u8;
-                        data[i + 3] = (255.0   * af + data[i + 3] as f32 * inv).min(255.0) as u8;
+                        data[i + 3] = (255.0 * af + data[i + 3] as f32 * inv).min(255.0) as u8;
                     });
                 }
             }};
@@ -173,9 +173,14 @@ pub fn render_ring(avail: f64, color_rgb: (u8, u8, u8), size: u32) -> Vec<u8> {
         {
             let ow = (size as f32 * 0.06).round().max(1.0) as i32;
             let outline: [(i32, i32); 8] = [
-                (-ow, -ow), (0, -ow), (ow, -ow),
-                (-ow, 0),             (ow, 0),
-                (-ow, ow), (0, ow), (ow, ow),
+                (-ow, -ow),
+                (0, -ow),
+                (ow, -ow),
+                (-ow, 0),
+                (ow, 0),
+                (-ow, ow),
+                (0, ow),
+                (ow, ow),
             ];
             for (dx, dy) in outline {
                 blit_glyphs!(26, 26, 26, dx, dy);

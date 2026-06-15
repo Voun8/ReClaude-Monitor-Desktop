@@ -22,7 +22,11 @@ pub fn spawn() {
     thread::spawn(|| {
         let listener = match TcpListener::bind(("127.0.0.1", FIXED_PORT)) {
             Ok(l) => l,
-            Err(_) => return,
+            Err(e) => {
+                // 设计上的安静回退（happy() 会改用动态端口），留一行日志便于区分「回退」与「环境异常」
+                eprintln!("[forwarder] 固定端口 {FIXED_PORT} 监听失败，回退动态端口: {e}");
+                return;
+            }
         };
         for stream in listener.incoming() {
             if let Ok(client) = stream {

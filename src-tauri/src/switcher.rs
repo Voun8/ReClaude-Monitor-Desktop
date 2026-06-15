@@ -140,7 +140,7 @@ fn quiet_cmd_str(program: &str) -> Command {
 }
 
 /// 定位 reclaude 可执行文件：默认安装路径 → PATH 各目录。
-pub fn find_reclaude() -> Option<PathBuf> {
+fn find_reclaude() -> Option<PathBuf> {
     #[cfg(windows)]
     let bin_name = "reclaude.exe";
     #[cfg(not(windows))]
@@ -205,7 +205,7 @@ pub fn find_reclaude() -> Option<PathBuf> {
 }
 
 /// 从 device.json 读取账号邮箱。
-pub fn read_email(json_path: &Path) -> String {
+fn read_email(json_path: &Path) -> String {
     if !json_path.exists() {
         return "(none)".to_string();
     }
@@ -254,9 +254,9 @@ fn mirror_dir(src: &Path, dst: &Path, exclude_dirs: &[&str]) -> Result<(), Strin
     #[cfg(windows)]
     {
         let mut cmd = quiet_cmd_str("robocopy");
-        cmd.arg(src)
-            .arg(dst)
-            .args(["/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:1", "/W:1"]);
+        cmd.arg(src).arg(dst).args([
+            "/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:1", "/W:1",
+        ]);
         if !exclude_dirs.is_empty() {
             cmd.arg("/XD");
             for d in exclude_dirs {
@@ -287,9 +287,7 @@ fn mirror_dir(src: &Path, dst: &Path, exclude_dirs: &[&str]) -> Result<(), Strin
         let mut src_arg = src.as_os_str().to_os_string();
         src_arg.push("/");
         cmd.arg(src_arg).arg(dst);
-        let status = cmd
-            .status()
-            .map_err(|e| format!("无法运行 rsync: {e}"))?;
+        let status = cmd.status().map_err(|e| format!("无法运行 rsync: {e}"))?;
         if !status.success() {
             return Err(format!(
                 "rsync 失败 (code={:?}): {} -> {}",
@@ -304,6 +302,9 @@ fn mirror_dir(src: &Path, dst: &Path, exclude_dirs: &[&str]) -> Result<(), Strin
 
 // reclaude state.json 缺失/坏掉时的兜底端口
 const DAEMON_PORT_FALLBACK: u16 = 49154;
+
+// 快照前等桌面 App 退出的上限
+const APP_EXIT_WAIT_MS: u64 = 3000;
 
 /// 从 ~/.reclaude/state.json 读 daemon 端口。
 /// 优先 daemon.port（运行中），其次 last_port（已停时残留的上次值），兜底 49154。
@@ -441,22 +442,46 @@ fn write_device_seed(seed: &str) -> Result<(), String> {
     }
 }
 
+/// exe 路径是否在 .reclaude\claude-app 前缀下（即桌面 App 进程，绝不匹配 CLI claude）。
+fn is_claude_app_proc(prefix: &str, process: &sysinfo::Process) -> bool {
+    process
+        .exe()
+        .map(|e| e.to_string_lossy().to_lowercase().starts_with(prefix))
+        .unwrap_or(false)
+}
+
 /// 只杀"桌面 App"（路径在 .reclaude\claude-app 下），绝不动正在运行的 CLI claude。
 fn stop_claude_app(paths: &Paths) {
     use sysinfo::System;
-    let prefix = paths
-        .claude_app_prefix
-        .to_string_lossy()
-        .to_lowercase();
+    let prefix = paths.claude_app_prefix.to_string_lossy().to_lowercase();
     let mut sys = System::new_all();
     sys.refresh_all();
-    for (_pid, process) in sys.processes() {
-        if let Some(exe) = process.exe() {
-            let exe_lower = exe.to_string_lossy().to_lowercase();
-            if exe_lower.starts_with(&prefix) {
-                process.kill();
-            }
+    for process in sys.processes().values() {
+        if is_claude_app_proc(&prefix, process) {
+            process.kill();
         }
+    }
+}
+
+/// 等桌面 App 进程全部退出（kill 是异步的），最长 max_ms；超时返回 false。
+fn wait_claude_app_down(paths: &Paths, max_ms: u64) -> bool {
+    use sysinfo::System;
+    let prefix = paths.claude_app_prefix.to_string_lossy().to_lowercase();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(max_ms);
+    loop {
+        let mut sys = System::new_all();
+        sys.refresh_all();
+        if !sys
+            .processes()
+            .values()
+            .any(|p| is_claude_app_proc(&prefix, p))
+        {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
@@ -486,11 +511,16 @@ fn stop_reclaude_daemons() {
 
 // ============ 档案监控凭证（monitor.json + 根映射）============
 
-fn read_root_creds(paths: &Paths) -> serde_json::Map<String, serde_json::Value> {
-    match fs::read_to_string(paths.root_creds_file()) {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-        Err(_) => serde_json::Map::new(),
+/// 读根映射。文件不存在视为空表；存在但解析失败必须报错——
+/// 绝不能拿空表继续走「insert 后整文件覆盖写」，否则一次损坏就静默丢光全部凭证。
+fn read_root_creds(paths: &Paths) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let p = paths.root_creds_file();
+    if !p.exists() {
+        return Ok(serde_json::Map::new());
     }
+    let raw = fs::read_to_string(&p).map_err(|e| format!("读取 {} 失败: {e}", p.display()))?;
+    serde_json::from_str(&raw)
+        .map_err(|e| format!("{} 解析失败（文件可能损坏，已停止写入）: {e}", p.display()))
 }
 
 fn write_root_creds(
@@ -520,41 +550,71 @@ fn write_profile_monitor(dir: &Path, cred: &MonitorCred) -> Result<(), String> {
     Ok(())
 }
 
-/// 查询某邮箱的监控凭证：先扫各档案 monitor.json（邮箱匹配），再回退根映射。
-/// 目录扫描前先排序，避免 fs::read_dir 的非确定顺序导致同邮箱多档案返回不一致。
-pub fn get_monitor_cred(paths: &Paths, email: &str) -> Option<MonitorCred> {
-    if paths.profiles_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&paths.profiles_dir) {
-            let mut dirs: Vec<PathBuf> = entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect();
-            dirs.sort();
-            for path in dirs {
-                if let Some(c) = read_profile_monitor(&path) {
-                    if c.email.eq_ignore_ascii_case(email) {
-                        return Some(c);
-                    }
-                }
-            }
-        }
-    }
-    let map = read_root_creds(paths);
-    map.get(email).and_then(|v| {
-        Some(MonitorCred {
-            email: email.to_string(),
-            password: v.get("password")?.as_str()?.to_string(),
-            org_id: v
-                .get("orgId")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-        })
+/// 档案根目录下的全部子目录，按名排序——fs::read_dir 顺序非确定，排序保证结果稳定。
+fn sorted_profile_dirs(paths: &Paths) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(&paths.profiles_dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+fn root_monitor_cred_for(
+    map: &serde_json::Map<String, serde_json::Value>,
+    email: &str,
+) -> Option<MonitorCred> {
+    let value = map.get(email).or_else(|| {
+        map.iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(email))
+            .map(|(_, value)| value)
+    })?;
+    Some(MonitorCred {
+        email: email.to_string(),
+        password: value.get("password")?.as_str()?.to_string(),
+        org_id: value
+            .get("orgId")
+            .or_else(|| value.get("org_id"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
-/// 写入监控凭证：profile_name 给定则写该档案 monitor.json；总是同步根映射。
+/// 查询某邮箱的监控凭证：先扫各档案 monitor.json（邮箱匹配），再回退根映射。
+pub fn get_monitor_cred(paths: &Paths, email: &str) -> Option<MonitorCred> {
+    let root_cred = match read_root_creds(paths) {
+        Ok(map) => root_monitor_cred_for(&map, email),
+        Err(e) => {
+            eprintln!("[switcher] {e}");
+            None
+        }
+    };
+    for path in sorted_profile_dirs(paths) {
+        if let Some(mut c) = read_profile_monitor(&path) {
+            if c.email.eq_ignore_ascii_case(email) {
+                if let Some(root) = &root_cred {
+                    if c.password.trim().is_empty() {
+                        c.password = root.password.clone();
+                    }
+                    if c.org_id.trim().is_empty() {
+                        c.org_id = root.org_id.clone();
+                    }
+                }
+                return Some(c);
+            }
+        }
+    }
+    root_cred
+}
+
+/// 写入监控凭证：profile_name 给定则写该档案 monitor.json（凭证随快照走），
+/// 否则写根映射（供「当前账号还没有档案」的场景）。两处互斥，不做镜像双写；
+/// 读取侧（get/has）先查档案再回退根映射，兼容历史双写产生的旧数据。
 pub fn set_monitor_cred(
     paths: &Paths,
     cred: &MonitorCred,
@@ -563,9 +623,9 @@ pub fn set_monitor_cred(
     if let Some(name) = profile_name {
         let safe = validate_profile_name(name)?;
         let dir = paths.profiles_dir.join(safe);
-        write_profile_monitor(&dir, cred)?;
+        return write_profile_monitor(&dir, cred);
     }
-    let mut map = read_root_creds(paths);
+    let mut map = read_root_creds(paths)?;
     map.insert(
         cred.email.clone(),
         serde_json::json!({ "password": cred.password, "orgId": cred.org_id }),
@@ -577,23 +637,19 @@ fn has_monitor_for(paths: &Paths, dir: &Path, email: &str) -> bool {
     if read_profile_monitor(dir).is_some() {
         return true;
     }
-    read_root_creds(paths).contains_key(email)
+    read_root_creds(paths)
+        .map(|m| m.contains_key(email))
+        .unwrap_or_else(|e| {
+            eprintln!("[switcher] {e}");
+            false
+        })
 }
 
 // ============ list / save / use / remove ============
 
 pub fn list_profiles(paths: &Paths) -> Vec<ProfileInfo> {
     let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(&paths.profiles_dir) else {
-        return out;
-    };
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort();
-    for dir in dirs {
+    for dir in sorted_profile_dirs(paths) {
         let name = dir
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -622,7 +678,9 @@ pub fn save_profile(
 ) -> Result<String, String> {
     let safe = validate_profile_name(name)?;
     if !paths.device_json.exists() {
-        return Err("当前没有登录（找不到 device.json）。请先用 reclaude 登录目标账号再保存。".to_string());
+        return Err(
+            "当前没有登录（找不到 device.json）。请先用 reclaude 登录目标账号再保存。".to_string(),
+        );
     }
     let dest = paths.profiles_dir.join(safe);
     fs::create_dir_all(&dest).map_err(|e| format!("创建档案目录失败: {e}"))?;
@@ -647,9 +705,11 @@ pub fn save_profile(
         }
     }
     if paths.appdata_dir.exists() {
-        // 镜像前先停桌面 App，避免拷到不一致的 SQLite/leveldb（导致后续切换时数据损坏）
+        // 镜像前先停桌面 App 并确认进程真正退出，避免拷到不一致的 SQLite/leveldb
         stop_claude_app(paths);
-        std::thread::sleep(std::time::Duration::from_millis(800));
+        if !wait_claude_app_down(paths, APP_EXIT_WAIT_MS) {
+            eprintln!("[switcher] 桌面 App 未在 {APP_EXIT_WAIT_MS}ms 内退出，快照可能不一致");
+        }
         mirror_dir(
             &paths.appdata_dir,
             &dest.join("claude-app-data"),
@@ -734,8 +794,13 @@ pub fn use_profile(paths: &Paths, name: &str, no_app: bool) -> Result<String, St
             .arg("app")
             .spawn()
             .map_err(|e| format!("启动桌面 App 失败: {e}"))?;
-        // App 会顺带起 daemon，但 App 启动较慢，给 5s
-        let _ = wait_daemon_up(paths, 5000);
+        // App 会顺带起 daemon，但 App 启动较慢，给 5s；
+        // 超时如实上报（与 no_app 分支对称），凭证已写入、App 已拉起，稍后可能自行就绪
+        if wait_daemon_up(paths, 5000).is_none() {
+            return Err(
+                "已写入凭证并启动桌面 App，但 daemon 5s 内未就绪，可能仍在启动中；若未生效请稍后重试".to_string(),
+            );
+        }
     }
     Ok(email)
 }
@@ -746,11 +811,16 @@ pub fn remove_profile(paths: &Paths, name: &str) -> Result<(), String> {
     if !dir.exists() {
         return Err(format!("档案 '{safe}' 不存在。"));
     }
-    // 同时清理根映射里该档案的监控凭证
+    // 同时清理根映射里该档案的监控凭证（含历史双写产生的镜像条目）
     if let Some(cred) = read_profile_monitor(&dir) {
-        let mut map = read_root_creds(paths);
-        map.remove(&cred.email);
-        let _ = write_root_creds(paths, &map);
+        match read_root_creds(paths) {
+            Ok(mut map) => {
+                if map.remove(&cred.email).is_some() {
+                    let _ = write_root_creds(paths, &map);
+                }
+            }
+            Err(e) => eprintln!("[switcher] {e}"),
+        }
     }
     fs::remove_dir_all(&dir).map_err(|e| format!("删除档案失败: {e}"))
 }

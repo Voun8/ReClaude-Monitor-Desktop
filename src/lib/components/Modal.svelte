@@ -12,7 +12,7 @@
   }
 </script>
 
-<svelte:window on:keydown={onKey} />
+<svelte:window onkeydown={onKey} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -94,5 +94,97 @@
   }
   .body {
     padding: 16px;
+  }
+
+  /* 弹窗表单的公共词汇表（field / cbox / modal-foot / hint / confirm），
+     供各业务弹窗的 children 内容复用，避免每个弹窗各抄一份 */
+  .body :global(.field) {
+    margin-bottom: 11px;
+  }
+  .body :global(.field label) {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 5px;
+  }
+  .body :global(.field input) {
+    width: 100%;
+    padding: 9px 11px;
+    font-size: 13px;
+    border-radius: 9px;
+    background: var(--surface-2);
+    color: var(--fg);
+    border: 1px solid var(--border-strong);
+    outline: none;
+  }
+  .body :global(.field input:focus) {
+    border-color: var(--accent);
+  }
+  .body :global(.cbox) {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 12.5px;
+    margin: 4px 0 12px;
+    cursor: pointer;
+  }
+  .body :global(.cbox input) {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
+  }
+  .body :global(.modal-foot) {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .body :global(.modal-foot button) {
+    padding: 9px 16px;
+    border-radius: 9px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .body :global(.primary) {
+    background: var(--accent);
+    color: #fff;
+  }
+  .body :global(.primary:hover:not(:disabled)) {
+    filter: brightness(1.08);
+  }
+  .body :global(.primary:disabled) {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .body :global(.danger) {
+    background: var(--err);
+    color: #fff;
+  }
+  .body :global(.danger:hover:not(:disabled)) {
+    filter: brightness(1.05);
+  }
+  .body :global(.cancel) {
+    background: var(--surface-2);
+    color: var(--fg);
+    border: 1px solid var(--border-strong);
+  }
+  .body :global(.cancel:hover) {
+    border-color: var(--muted);
+  }
+  .body :global(.hint) {
+    font-size: 11.5px;
+    color: var(--faint);
+    margin: 12px 0 0;
+    line-height: 1.6;
+  }
+  .body :global(.confirm) {
+    font-size: 14px;
+    margin: 0 0 4px;
+    line-height: 1.6;
+  }
+  .body :global(.cmuted) {
+    color: var(--muted);
+    font-size: 12.5px;
   }
 </style>

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { api, type MonitorSnapshot } from "$lib/api";
+  import { fmtUsdCompact } from "$lib/format";
   import { getCurrentWindow } from "@tauri-apps/api/window";
 
   let snapshot = $state<MonitorSnapshot | null>(null);
@@ -35,12 +36,8 @@
   const quota = $derived(snapshot?.quota ?? null);
   const metrics = $derived(snapshot?.metrics ?? null);
 
-  // 水位高度 = 当前用量 / 全部用量
-  const ratio = $derived.by(() => {
-    const q = quota;
-    if (!q || !q.totalUsd || q.totalUsd <= 0) return 0;
-    return Math.max(0, Math.min(1, q.usedUsd / q.totalUsd));
-  });
+  // 水位高度 = 用量占比（直接用后端 ratio，仅钳制）
+  const ratio = $derived(quota ? Math.max(0, Math.min(1, quota.ratio)) : 0);
   // 水面距顶部（水位越高，top 越小）
   const waterTop = $derived(`${Math.round((1 - ratio) * 100)}%`);
 
@@ -51,12 +48,6 @@
       : "—",
   );
   const level = $derived(metrics?.stateLevel ?? "ok");
-
-  function usd(v: number): string {
-    if (v >= 1000) return "$" + (v / 1000).toFixed(v >= 10000 ? 0 : 1) + "k";
-    if (v >= 100) return "$" + Math.round(v);
-    return "$" + v.toFixed(2);
-  }
 
   // 悬浮球：手动区分拖拽与点击。
   // 不用 data-tauri-drag-region——它在 Windows 上 pointerdown 即进系统拖拽循环，
@@ -167,7 +158,7 @@
         <span class="cap">错误率</span>
         <span class="big">{errText}<span class="pct">%</span></span>
         <span class="usage">
-          {quota ? `${usd(quota.usedUsd)} / ${usd(quota.totalUsd)}` : "额度未启用"}
+          {quota ? `${fmtUsdCompact(quota.usedUsd)} / ${fmtUsdCompact(quota.totalUsd)}` : "额度未启用"}
         </span>
       </div>
     {:else}

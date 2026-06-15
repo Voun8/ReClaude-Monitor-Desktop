@@ -1,9 +1,14 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import { Chart } from "@antv/g2";
+  import type { HeatCell } from "$lib/api";
+  import { fmtTokens } from "$lib/format";
+  import { cssVar, isDarkTheme } from "$lib/theme";
 
-  type Point = { date: string; value: number; ts: number };
+  type Point = HeatCell & { ts: number };
   let { points }: { points: Point[] } = $props();
+
+  const HEIGHT = 150;
 
   let el = $state<HTMLDivElement | null>(null);
   let chart: Chart | null = null;
@@ -16,28 +21,12 @@
     return `${mm}-${dd}`;
   }
 
-  function cssVar(name: string, fallback: string): string {
-    const v = getComputedStyle(document.documentElement)
-      .getPropertyValue(name)
-      .trim();
-    return v || fallback;
-  }
-
   const rows = () =>
-    points.map((p) => ({ label: label(p), value: p.value, key: p.date }));
-
-  // 缩写：坐标轴用 0 位小数（141M），tooltip 用 2 位（140.78M）
-  function abbr(v: number, d: number): string {
-    const n = Math.abs(v);
-    if (n >= 1e9) return (v / 1e9).toFixed(d) + "B";
-    if (n >= 1e6) return (v / 1e6).toFixed(d) + "M";
-    if (n >= 1e3) return (v / 1e3).toFixed(d) + "k";
-    return String(Math.round(v));
-  }
+    points.map((p) => ({ label: label(p), count: p.count, key: p.date }));
 
   function build() {
     if (!el) return;
-    const dark = !window.matchMedia("(prefers-color-scheme: light)").matches;
+    const dark = isDarkTheme();
     const accent = cssVar("--accent", "#d97757");
     const faint = cssVar("--faint", "#6b7280");
     const grid = cssVar("--border", "rgba(255,255,255,0.08)");
@@ -45,7 +34,7 @@
     chart = new Chart({
       container: el,
       autoFit: true,
-      height: 150,
+      height: HEIGHT,
       theme: dark ? "classicDark" : "classic",
       paddingTop: 12,
       paddingRight: 8,
@@ -57,7 +46,7 @@
       .interval()
       .data(rows())
       .encode("x", "label")
-      .encode("y", "value")
+      .encode("y", "count")
       .scale("y", { nice: true })
       .style("fill", accent)
       .style("radius", 4)
@@ -76,12 +65,12 @@
         labelFontSize: 11,
         gridStroke: grid,
         tickCount: 4,
-        labelFormatter: (v: number) => abbr(v, 0),
+        labelFormatter: (v: number) => fmtTokens(v, 0),
       })
       .tooltip({
         title: (d: { label: string }) => d.label,
         items: [
-          { field: "value", name: "活动", valueFormatter: (v: number) => abbr(v, 2) },
+          { field: "count", name: "活动", valueFormatter: (v: number) => fmtTokens(v, 2) },
         ],
       });
 
@@ -106,7 +95,7 @@
 {#if points.length === 0}
   <div class="empty">该时间段暂无活动数据</div>
 {:else}
-  <div class="g2" bind:this={el}></div>
+  <div class="g2" style="height:{HEIGHT}px" bind:this={el}></div>
 {/if}
 
 <style>
@@ -118,6 +107,5 @@
   }
   .g2 {
     width: 100%;
-    height: 150px;
   }
 </style>

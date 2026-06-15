@@ -2,6 +2,8 @@
   import { onDestroy } from "svelte";
   import { Chart } from "@antv/g2";
   import type { HeatCell } from "$lib/api";
+  import { flexDate, fmtTokens } from "$lib/format";
+  import { cssVar, isDarkTheme } from "$lib/theme";
 
   let { cells, weeks = 53 }: { cells: HeatCell[]; weeks?: number } = $props();
 
@@ -13,15 +15,10 @@
   }
 
   function normDate(raw: string): string | null {
+    // ISO 串直接截取日期段，避免 date-only 被 Date 按 UTC 解析造成跨时区偏移
     if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
-    const n = Number(raw);
-    if (raw.trim() !== "" && !Number.isNaN(n)) {
-      const ms = n < 1e12 ? n * 1000 : n; // 秒 → 毫秒
-      const d = new Date(ms);
-      if (!Number.isNaN(d.getTime())) return toKey(d);
-    }
-    const d = new Date(raw);
-    return Number.isNaN(d.getTime()) ? null : toKey(d);
+    const d = flexDate(raw);
+    return d ? toKey(d) : null;
   }
 
   type Day = { week: number; weekday: number; date: string; count: number };
@@ -57,12 +54,8 @@
   let el = $state<HTMLDivElement | null>(null);
   let chart: Chart | null = null;
 
-  function cssVar(name: string, fallback: string): string {
-    const v = getComputedStyle(document.documentElement)
-      .getPropertyValue(name)
-      .trim();
-    return v || fallback;
-  }
+  // 5 级色阶的透明度阶梯——JS ramp 与图例共用这一份定义
+  const HEAT_ALPHAS = [0.3, 0.52, 0.76];
 
   function rgba(hex: string, a: number): string {
     const h = hex.replace("#", "");
@@ -75,16 +68,10 @@
 
   function build() {
     if (!el) return;
-    const dark = !window.matchMedia("(prefers-color-scheme: light)").matches;
+    const dark = isDarkTheme();
     const accent = cssVar("--accent", "#d97757");
     const track = cssVar("--track", "rgba(255,255,255,0.09)");
-    const ramp = [
-      track,
-      rgba(accent, 0.3),
-      rgba(accent, 0.52),
-      rgba(accent, 0.76),
-      accent,
-    ];
+    const ramp = [track, ...HEAT_ALPHAS.map((a) => rgba(accent, a)), accent];
     const colorOf = (c: number) =>
       c <= 0 ? ramp[0] : ramp[Math.min(4, Math.ceil((c / maxCount) * 4))];
 
@@ -118,13 +105,7 @@
           {
             field: "count",
             name: "活动",
-            valueFormatter: (v: number) => {
-              const n = Math.abs(v);
-              if (n >= 1e9) return (v / 1e9).toFixed(2) + "B";
-              if (n >= 1e6) return (v / 1e6).toFixed(2) + "M";
-              if (n >= 1e3) return (v / 1e3).toFixed(2) + "k";
-              return String(Math.round(v));
-            },
+            valueFormatter: (v: number) => fmtTokens(v, 2),
           },
         ],
       });
@@ -154,11 +135,11 @@
   </div>
   <div class="legend">
     <span>少</span>
-    <div class="cell lvl-0"></div>
-    <div class="cell lvl-1"></div>
-    <div class="cell lvl-2"></div>
-    <div class="cell lvl-3"></div>
-    <div class="cell lvl-4"></div>
+    <div class="cell" style="background: var(--track)"></div>
+    {#each HEAT_ALPHAS as a (a)}
+      <div class="cell" style="background: color-mix(in srgb, var(--accent) {a * 100}%, transparent)"></div>
+    {/each}
+    <div class="cell" style="background: var(--accent)"></div>
     <span>多</span>
   </div>
 </div>
@@ -183,20 +164,5 @@
     width: 11px;
     height: 11px;
     border-radius: 3px;
-  }
-  .lvl-0 {
-    background: var(--track);
-  }
-  .lvl-1 {
-    background: color-mix(in srgb, var(--accent) 30%, transparent);
-  }
-  .lvl-2 {
-    background: color-mix(in srgb, var(--accent) 52%, transparent);
-  }
-  .lvl-3 {
-    background: color-mix(in srgb, var(--accent) 76%, transparent);
-  }
-  .lvl-4 {
-    background: var(--accent);
   }
 </style>
