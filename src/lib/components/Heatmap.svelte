@@ -3,7 +3,7 @@
   import { Chart } from "@antv/g2";
   import type { HeatCell } from "$lib/api";
   import { flexDate, fmtTokens } from "$lib/format";
-  import { cssVar, isDarkTheme } from "$lib/theme";
+  import { cssVarReader, isDarkTheme } from "$lib/theme";
 
   let { cells, weeks = 53 }: { cells: HeatCell[]; weeks?: number } = $props();
 
@@ -57,6 +57,13 @@
   // 5 级色阶的透明度阶梯——JS ramp 与图例共用这一份定义
   const HEAT_ALPHAS = [0.3, 0.52, 0.76];
 
+  // ramp 由 build() 按主题设定;colorOf 读顶层 ramp + 当前 maxCount($derived),
+  // 使增量 changeData 后颜色按最新 maxCount 计算,而非 build 时闭包里的旧值。
+  let ramp: string[] = [];
+  function colorOf(c: number): string {
+    return c <= 0 ? ramp[0] : ramp[Math.min(4, Math.ceil((c / maxCount) * 4))];
+  }
+
   function rgba(hex: string, a: number): string {
     const h = hex.replace("#", "");
     if (!/^[0-9a-fA-F]{6}$/.test(h)) return hex;
@@ -69,11 +76,10 @@
   function build() {
     if (!el) return;
     const dark = isDarkTheme();
-    const accent = cssVar("--accent", "#d97757");
-    const track = cssVar("--track", "rgba(255,255,255,0.09)");
-    const ramp = [track, ...HEAT_ALPHAS.map((a) => rgba(accent, a)), accent];
-    const colorOf = (c: number) =>
-      c <= 0 ? ramp[0] : ramp[Math.min(4, Math.ceil((c / maxCount) * 4))];
+    const v = cssVarReader();
+    const accent = v("--accent", "#d97757");
+    const track = v("--track", "rgba(255,255,255,0.09)");
+    ramp = [track, ...HEAT_ALPHAS.map((a) => rgba(accent, a)), accent];
 
     chart = new Chart({
       container: el,
@@ -113,17 +119,34 @@
     chart.render();
   }
 
-  // 数据变化 → 重建（宽度随周数变化）
+  let lastDark: boolean | null = null;
+  let lastWidth = 0;
+
+  // 数据变化 → 增量 changeData，避免销毁重建整年热力图（~371 cell）；
+  // 仅首次挂载或主题切换时重建（需重读主题色/ramp）。
   $effect(() => {
     void days;
     void weekCount;
     if (!el) {
       chart?.destroy();
       chart = null;
+      lastDark = null;
       return;
     }
-    chart?.destroy();
-    build();
+    const dark = isDarkTheme();
+    if (!chart || dark !== lastDark) {
+      chart?.destroy();
+      build();
+      lastDark = dark;
+      lastWidth = weekCount * 15 + 8;
+    } else {
+      const w = weekCount * 15 + 8;
+      if (w !== lastWidth) {
+        chart.changeSize(w, 7 * 15 + 6);
+        lastWidth = w;
+      }
+      chart.changeData(days);
+    }
   });
 
   onDestroy(() => chart?.destroy());

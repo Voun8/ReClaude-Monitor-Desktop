@@ -81,6 +81,8 @@ pub struct Allocation {
 #[serde(rename_all = "camelCase")]
 pub struct MonitorSnapshot {
     pub quota: Option<QuotaOut>,
+    // account_status 不含 metrics（恒 None）→ 不序列化出幻影 metrics:null，序列化形状与前端 AccountStatus(Omit) 对齐
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<MetricsOut>,
     pub org_id: String,
     pub error: Option<String>,

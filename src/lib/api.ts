@@ -44,7 +44,8 @@ export interface MetricsOut {
 
 export interface MonitorSnapshot {
   quota: QuotaOut | null;
-  metrics: MetricsOut | null;
+  // 后端 account_status 不含 metrics（skip_serializing_if）→ 该字段可能缺省
+  metrics?: MetricsOut | null;
   orgId: string;
   error: string | null;
   badCredentials: boolean;

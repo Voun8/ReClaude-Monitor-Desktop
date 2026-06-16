@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-06-16
+
+本次为性能优化 + 内部重构版本，对外行为保持不变（除下述修复）。
+
+### 修复
+
+- 服务指标（错误率 / 延迟）在登录 Cookie 过期时被静默吞掉，导致额度正常却指标空白且无法自愈 → 现指标拉取也走会话编排，Cookie 失效时自动重登重试。
+
+### 优化
+
+- 托盘圆环字体改为进程级缓存，停止每次刷新（约每 5 秒）重复读盘并解析字体文件。
+- 账号热切换的进程扫描改为按需采集（仅可执行路径 / 命令行），不再全量采集 CPU / 内存 / 磁盘 / 用户；等待桌面 App 退出时复用同一扫描实例。
+- 年度活动热力图改为增量更新（`changeData` / `changeSize`），切换账号 / 刷新 / 切设备时不再销毁重建整张图表。
+- 档案列表的监控凭证检测一次性读取根映射，避免逐档案重复读盘解析。
+
+### 变更
+
+- 前端与 Rust 后端内部重构（行为等价）：账号行状态判定下沉直读 store、用量页重载与凭证弹窗改为直调 / 共享、会话编排收敛为单一原语（`with_session` 复用）、`MonitorView` / `FloatWidget` 大组件按职责拆分（HeroCard / AccountSwitcher / dragOrClick action 等）。
+
 ## [1.1.5] - 2026-06-15
 
 ### 变更

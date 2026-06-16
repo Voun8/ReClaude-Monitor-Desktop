@@ -162,33 +162,48 @@ async fn run_blocking<T: Send + 'static>(
 }
 
 #[tauri::command]
-fn get_env() -> Result<EnvInfo, String> {
-    let paths = Paths::resolve()?;
-    Ok(switcher::env_info(&paths))
+async fn get_env() -> Result<EnvInfo, String> {
+    run_blocking(|| {
+        let paths = Paths::resolve()?;
+        Ok(switcher::env_info(&paths))
+    })
+    .await
 }
 
 #[tauri::command]
-fn current_account() -> Result<Option<String>, String> {
-    let paths = Paths::resolve()?;
-    Ok(switcher::current_email(&paths))
+async fn current_account() -> Result<Option<String>, String> {
+    run_blocking(|| {
+        let paths = Paths::resolve()?;
+        Ok(switcher::current_email(&paths))
+    })
+    .await
 }
 
 #[tauri::command]
-fn list_profiles() -> Result<Vec<ProfileInfo>, String> {
-    let paths = Paths::resolve()?;
-    Ok(switcher::list_profiles(&paths))
+async fn list_profiles() -> Result<Vec<ProfileInfo>, String> {
+    run_blocking(|| {
+        let paths = Paths::resolve()?;
+        Ok(switcher::list_profiles(&paths))
+    })
+    .await
 }
 
 #[tauri::command]
-fn get_monitor_cred(email: String) -> Result<Option<MonitorCred>, String> {
-    let paths = Paths::resolve()?;
-    Ok(switcher::get_monitor_cred(&paths, &email))
+async fn get_monitor_cred(email: String) -> Result<Option<MonitorCred>, String> {
+    run_blocking(move || {
+        let paths = Paths::resolve()?;
+        Ok(switcher::get_monitor_cred(&paths, &email))
+    })
+    .await
 }
 
 #[tauri::command]
-fn set_monitor_cred(cred: MonitorCred, profile_name: Option<String>) -> Result<(), String> {
-    let paths = Paths::resolve()?;
-    switcher::set_monitor_cred(&paths, &cred, profile_name.as_deref())
+async fn set_monitor_cred(cred: MonitorCred, profile_name: Option<String>) -> Result<(), String> {
+    run_blocking(move || {
+        let paths = Paths::resolve()?;
+        switcher::set_monitor_cred(&paths, &cred, profile_name.as_deref())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -236,11 +251,17 @@ async fn refresh_monitor(
     org_id: String,
 ) -> Result<MonitorSnapshot, String> {
     let r = session::resolve_quota(&state, &email, &password, &org_id).await;
-    let metrics = match (&r.cookie, &r.api_base) {
-        (Some(c), Some(api_base)) => monitor::fetch_metrics(&state.client, api_base, c)
-            .await
-            .ok(),
-        _ => None,
+    // metrics 也走会话编排：cookie 过期时自动重登重试，而非旧实现 .ok() 吞掉 401 导致
+    // 额度正常但指标空白且无法自愈。已知凭据错误(bad)时跳过，避免对错误凭据重复登录。
+    let metrics = if r.bad {
+        None
+    } else {
+        let client = &state.client;
+        session::with_session(&state, &email, &password, |base, cookie| async move {
+            monitor::fetch_metrics(client, &base, &cookie).await
+        })
+        .await
+        .ok()
     };
     Ok(MonitorSnapshot {
         quota: r.quota,

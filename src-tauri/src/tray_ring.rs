@@ -4,6 +4,7 @@
 // 返回直通(未预乘) RGBA 字节，供 Tauri 托盘 Image::new_owned 使用。
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
+use std::sync::OnceLock;
 use tiny_skia::{Color, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 /// 按用量比例返回 (R,G,B) —— 与前端的健康配色保持一致。
@@ -46,6 +47,13 @@ fn load_font() -> Option<FontVec> {
         }
     }
     None
+}
+
+/// 进程级字体缓存：load_font 读盘 + 解析整套 TTF 较重,而 render_ring 每隔数秒被调用一次,
+/// 故只在首帧解析一次,后续复用同一份 &'static FontVec。
+fn font() -> Option<&'static FontVec> {
+    static FONT: OnceLock<Option<FontVec>> = OnceLock::new();
+    FONT.get_or_init(load_font).as_ref()
 }
 
 /// 画圆环（轨道 + 进度弧）+ 中间百分比。avail = 0..100（剩余可用%），size = 目标像素边长。
@@ -105,7 +113,7 @@ pub fn render_ring(avail: f64, color_rgb: (u8, u8, u8), size: u32) -> Vec<u8> {
     }
 
     // 中央百分比数字（不带 %，避免拥挤；3 位时缩小）
-    if let Some(font) = load_font() {
+    if let Some(font) = font() {
         // 字号系数：Windows 放大填满细环内圈；其它平台沿用原值
         #[cfg(target_os = "windows")]
         let (fs_small, fs_big) = (0.48_f32, 0.68_f32);

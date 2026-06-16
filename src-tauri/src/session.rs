@@ -118,8 +118,39 @@ async fn ensure_next_cookie(
     Err(last_err.unwrap_or_else(|| MonErr::Other("没有可用 API 地址".to_string())))
 }
 
-/// 带会话调用一个监控 API：登录（缓存 cookie）→ 调用 → 鉴权失败重登一次重试
-/// → 默认域失败沿候选域名链重试一次。各命令只需提供业务调用闭包。
+/// 会话调用原语（返回原始 MonErr 供需要区分错误类型的调用方复用）：
+/// 登录（缓存 cookie）→ 调用 → 鉴权失败重登一次重试 → 默认域失败沿候选域名链推进重试。
+/// with_session 与 resolve_quota 都基于它，避免 fallback 策略改一处漏多处。
+async fn with_session_raw<T, F, Fut>(
+    state: &AppState,
+    email: &str,
+    password: &str,
+    call: F,
+) -> Result<T, MonErr>
+where
+    F: Fn(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<T, MonErr>>,
+{
+    let (mut api_base, mut cookie) = ensure_cookie(state, email, password, false).await?;
+
+    loop {
+        match call(api_base.clone(), cookie.clone()).await {
+            Ok(v) => return Ok(v),
+            Err(MonErr::Auth(_)) => {
+                let (base, c) = ensure_cookie(state, email, password, true).await?;
+                return call(base, c).await;
+            }
+            Err(e) if should_fallback(&api_base, &e) => {
+                let (base, c) = ensure_next_cookie(state, email, password, &api_base).await?;
+                api_base = base;
+                cookie = c;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// with_session_raw 的 String 错误薄封装，供各命令直接返回给前端。
 pub async fn with_session<T, F, Fut>(
     state: &AppState,
     email: &str,
@@ -130,31 +161,9 @@ where
     F: Fn(String, String) -> Fut,
     Fut: std::future::Future<Output = Result<T, MonErr>>,
 {
-    let (mut api_base, mut cookie) = ensure_cookie(state, email, password, false)
+    with_session_raw(state, email, password, call)
         .await
-        .map_err(|e| e.message())?;
-
-    loop {
-        match call(api_base.clone(), cookie.clone()).await {
-            Ok(v) => return Ok(v),
-            Err(MonErr::Auth(_)) => {
-                let (base, c) = ensure_cookie(state, email, password, true)
-                    .await
-                    .map_err(|e| e.message())?;
-                return call(base, c).await.map_err(|e| e.message());
-            }
-            Err(e) if should_fallback(&api_base, &e) => {
-                match ensure_next_cookie(state, email, password, &api_base).await {
-                    Ok((base, c)) => {
-                        api_base = base;
-                        cookie = c;
-                    }
-                    Err(e) => return Err(e.message()),
-                }
-            }
-            Err(e) => return Err(e.message()),
-        }
-    }
+        .map_err(|e| e.message())
 }
 
 pub struct Resolved {
@@ -162,8 +171,6 @@ pub struct Resolved {
     pub org_id: String,
     pub error: Option<String>,
     pub bad: bool,
-    pub cookie: Option<String>,
-    pub api_base: Option<String>,
 }
 
 impl Resolved {
@@ -173,8 +180,6 @@ impl Resolved {
             org_id,
             bad: matches!(e, MonErr::BadCredentials(_)),
             error: Some(e.message()),
-            cookie: None,
-            api_base: None,
         }
     }
 }
@@ -222,53 +227,29 @@ pub async fn resolve_quota(
             org_id: org,
             error: None,
             bad: false,
-            cookie: Some(cookie),
-            api_base: Some(api_base),
         };
     }
 
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        match monitor::fetch_quota(&state.client, &api_base, &cookie, &org).await {
-            Ok(quota) => {
-                return Resolved {
-                    quota,
-                    org_id: org,
-                    error: None,
-                    bad: false,
-                    cookie: Some(cookie),
-                    api_base: Some(api_base),
-                }
-            }
-            Err(MonErr::Auth(_)) if attempt < 2 => {
-                match ensure_cookie(state, email, password, true).await {
-                    Ok((base, c)) => {
-                        api_base = base;
-                        cookie = c;
-                    }
-                    Err(e) => return Resolved::from_err(org, e),
-                }
-            }
-            Err(e) if should_fallback(&api_base, &e) => {
-                match ensure_next_cookie(state, email, password, &api_base).await {
-                    Ok((base, c)) => {
-                        api_base = base;
-                        cookie = c;
-                    }
-                    Err(e) => return Resolved::from_err(org, e),
-                }
-            }
-            Err(e) => {
-                return Resolved {
-                    quota: None,
-                    org_id: org,
-                    error: Some(e.message()),
-                    bad: false,
-                    cookie: Some(cookie),
-                    api_base: Some(api_base),
-                }
-            }
-        }
+    // 额度拉取复用统一会话原语（鉴权重登 + 域名 fallback），与其它监控 API 行为一致
+    let client = &state.client;
+    let org_for_fetch = org.clone();
+    match with_session_raw(state, email, password, move |base, cookie| {
+        let org = org_for_fetch.clone();
+        async move { monitor::fetch_quota(client, &base, &cookie, &org).await }
+    })
+    .await
+    {
+        Ok(quota) => Resolved {
+            quota,
+            org_id: org,
+            error: None,
+            bad: false,
+        },
+        Err(e) => Resolved {
+            bad: matches!(e, MonErr::BadCredentials(_)),
+            quota: None,
+            error: Some(e.message()),
+            org_id: org,
+        },
     }
 }

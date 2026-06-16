@@ -1,59 +1,78 @@
 <script lang="ts">
-  import type { QuotaOut } from "$lib/api";
+  import type { ProfileInfo } from "$lib/api";
   import { fmtUsd, quotaColor } from "$lib/format";
+  import { monitor, isActiveEmail } from "$lib/monitor.svelte";
   import { ArrowLeftRight, KeyRound, Trash2 } from "@lucide/svelte";
 
-  let {
-    name,
-    email,
-    isActive,
-    hasCreds,
-    quota,
-    loading,
-    errorText,
-    busy,
-    onUse,
-    onConfig,
-    onRemove,
-  }: {
-    name: string;
-    email: string;
-    isActive: boolean;
-    hasCreds: boolean;
-    quota: QuotaOut | null;
-    loading: boolean;
-    errorText: string | null;
+  let { profile, busy, onUse, onConfig, onRemove }: {
+    profile: ProfileInfo;
     busy: boolean;
     onUse: () => void;
     onConfig: () => void;
     onRemove: () => void;
   } = $props();
 
+  // 状态来源收敛在行内（直读 store），不再由 MonitorView 逐字段透传：
+  // 当前账号读快照额度，非当前账号读 accounts[email] 条目。
+  const isActive = $derived(isActiveEmail(profile.email));
+  const hasCreds = $derived(profile.hasMonitor);
+  const quota = $derived(
+    isActive
+      ? (monitor.snapshot?.quota ?? null)
+      : (monitor.accounts[profile.email]?.status?.quota ?? null),
+  );
+  const loading = $derived(
+    isActive ? false : monitor.accounts[profile.email]?.loading === true,
+  );
   const ratio = $derived(quota ? Math.max(0, Math.min(1, quota.ratio)) : 0);
+
+  // 非当前账号的失败/无套餐文案（原 MonitorView.errTextFor，与展示分支合并同源）
+  function errText(): string | null {
+    if (isActive) return null;
+    const st = monitor.accounts[profile.email]?.status;
+    if (!st) return null;
+    if (st.badCredentials) return "密码错误";
+    if (!st.quota && !st.orgId) return "无拼车套餐";
+    if (st.error && !st.quota) return "获取失败";
+    return null;
+  }
+
+  type RowState =
+    | { kind: "quota" }
+    | { kind: "loading" }
+    | { kind: "chip"; cls: "warn" | "muted"; text: string };
+
+  // 单一判别式决定额度区展示什么，渲染层只按 kind 出对应 UI（precedence 与原 {#if} 一致）
+  const rowState = $derived.by<RowState>(() => {
+    if (hasCreds && quota) return { kind: "quota" };
+    if (hasCreds && loading) return { kind: "loading" };
+    if (hasCreds) {
+      const text = errText();
+      if (text) return { kind: "chip", cls: "warn", text };
+    }
+    if (!hasCreds) return { kind: "chip", cls: "muted", text: "未配置监控" };
+    return { kind: "chip", cls: "muted", text: "无额度数据" };
+  });
 </script>
 
 <div class="row" class:active={isActive}>
   <div class="main">
     <div class="title-line">
-      <span class="name">{name}</span>
+      <span class="name">{profile.name}</span>
       {#if isActive}<span class="cur"><span class="dot"></span>当前</span>{/if}
     </div>
-    <div class="email">{email}</div>
+    <div class="email">{profile.email}</div>
 
-    {#if hasCreds && quota}
+    {#if rowState.kind === "quota" && quota}
       <div class="quota">
         <div class="bar"><div class="fill" style="width:{(ratio * 100).toFixed(1)}%;background:{quotaColor(ratio)}"></div></div>
         <span class="pct" style="color:{quotaColor(ratio)}">{quota.pct.toFixed(0)}%</span>
         <span class="usd">{fmtUsd(quota.usedUsd)} / {fmtUsd(quota.totalUsd)}</span>
       </div>
-    {:else if hasCreds && loading}
+    {:else if rowState.kind === "loading"}
       <div class="chip loading">额度加载中…</div>
-    {:else if hasCreds && errorText}
-      <div class="chip warn">{errorText}</div>
-    {:else if !hasCreds}
-      <div class="chip muted">未配置监控</div>
-    {:else}
-      <div class="chip muted">无额度数据</div>
+    {:else if rowState.kind === "chip"}
+      <div class="chip {rowState.cls}">{rowState.text}</div>
     {/if}
   </div>
 

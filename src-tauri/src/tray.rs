@@ -78,10 +78,17 @@ fn tray_icon_size(app: &tauri::AppHandle) -> u32 {
 /// 拉一次当前账号余额并把圆环画进托盘图标；成功渲染返回 true，无凭证/额度或失败返回 false。
 /// 后台循环与「切到圆环模式」共用它——切换时立即渲染，不必等下一次循环 tick 或退避结束。
 async fn refresh_tray_icon(app: &tauri::AppHandle) -> bool {
-    let data: Option<(f64, (u8, u8, u8))> = async {
+    // 凭证读取是同步磁盘 IO，放到 blocking 线程池，避免阻塞 async 运行时线程
+    let cred = tauri::async_runtime::spawn_blocking(|| {
         let paths = switcher::Paths::resolve().ok()?;
         let email = switcher::current_email(&paths)?;
-        let cred = switcher::get_monitor_cred(&paths, &email)?;
+        switcher::get_monitor_cred(&paths, &email)
+    })
+    .await
+    .ok()
+    .flatten();
+    let data: Option<(f64, (u8, u8, u8))> = async {
+        let cred = cred?;
         let s = app.state::<AppState>();
         let r = session::resolve_quota(&s, &cred.email, &cred.password, &cred.org_id).await;
         let q = r.quota?;

@@ -8,7 +8,7 @@ import {
   type MonitorSnapshot,
   type ProfileInfo,
 } from "./api";
-import { toast } from "./ui.svelte";
+import { openModal, toast } from "./ui.svelte";
 
 export const monitor = $state({
   env: null as EnvInfo | null,
@@ -34,6 +34,11 @@ export function currentProfileName(): string | null {
     (x) => x.email.toLowerCase() === monitor.currentEmail!.toLowerCase(),
   );
   return p ? p.name : null;
+}
+
+// 为当前账号打开凭证弹窗——MainPanel / MonitorView / UsageView 共用，避免三处复制同一 openModal
+export function openCredsForCurrent() {
+  openModal({ kind: "creds", profileName: null, email: monitor.currentEmail ?? "" });
 }
 
 export async function loadEnv() {

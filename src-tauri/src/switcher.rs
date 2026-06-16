@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -450,12 +451,21 @@ fn is_claude_app_proc(prefix: &str, process: &sysinfo::Process) -> bool {
         .unwrap_or(false)
 }
 
+/// 进程扫描只按 exe / cmd 匹配，故只采集这两项，跳过 new_all() 的 CPU/内存/磁盘/用户全量采集。
+fn proc_refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing()
+        .with_exe(UpdateKind::Always)
+        .with_cmd(UpdateKind::Always)
+}
+
+fn scan_processes() -> System {
+    System::new_with_specifics(RefreshKind::nothing().with_processes(proc_refresh_kind()))
+}
+
 /// 只杀"桌面 App"（路径在 .reclaude\claude-app 下），绝不动正在运行的 CLI claude。
 fn stop_claude_app(paths: &Paths) {
-    use sysinfo::System;
     let prefix = paths.claude_app_prefix.to_string_lossy().to_lowercase();
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    let sys = scan_processes();
     for process in sys.processes().values() {
         if is_claude_app_proc(&prefix, process) {
             process.kill();
@@ -465,12 +475,11 @@ fn stop_claude_app(paths: &Paths) {
 
 /// 等桌面 App 进程全部退出（kill 是异步的），最长 max_ms；超时返回 false。
 fn wait_claude_app_down(paths: &Paths, max_ms: u64) -> bool {
-    use sysinfo::System;
     let prefix = paths.claude_app_prefix.to_string_lossy().to_lowercase();
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(max_ms);
+    // 复用同一 System 实例,循环内只重采集进程,避免每轮重建整个 System
+    let mut sys = scan_processes();
     loop {
-        let mut sys = System::new_all();
-        sys.refresh_all();
         if !sys
             .processes()
             .values()
@@ -482,6 +491,7 @@ fn wait_claude_app_down(paths: &Paths, max_ms: u64) -> bool {
             return false;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, proc_refresh_kind());
     }
 }
 
@@ -489,10 +499,8 @@ fn wait_claude_app_down(paths: &Paths, max_ms: u64) -> bool {
 /// 仅匹配命令行里带 "daemon" 的 reclaude 进程：交互式 reclaude/claude 会话、
 /// 以及本监控 App 自身（命令行均无 daemon）都不会被误杀。
 fn stop_reclaude_daemons() {
-    use sysinfo::System;
-    let mut sys = System::new_all();
-    sys.refresh_all();
-    for (_pid, process) in sys.processes() {
+    let sys = scan_processes();
+    for process in sys.processes().values() {
         let Some(exe) = process.exe() else {
             continue;
         };
@@ -633,21 +641,15 @@ pub fn set_monitor_cred(
     write_root_creds(paths, &map)
 }
 
-fn has_monitor_for(paths: &Paths, dir: &Path, email: &str) -> bool {
-    if read_profile_monitor(dir).is_some() {
-        return true;
-    }
-    read_root_creds(paths)
-        .map(|m| m.contains_key(email))
-        .unwrap_or_else(|e| {
-            eprintln!("[switcher] {e}");
-            false
-        })
-}
-
 // ============ list / save / use / remove ============
 
 pub fn list_profiles(paths: &Paths) -> Vec<ProfileInfo> {
+    // 根映射读一次：避免每个档案都各读一遍整表（原 has_monitor_for 每次回退都重读 root_creds）。
+    // 严格 contains_key（区分大小写）语义与原实现一致。
+    let root_map = read_root_creds(paths).unwrap_or_else(|e| {
+        eprintln!("[switcher] {e}");
+        serde_json::Map::new()
+    });
     let mut out = Vec::new();
     for dir in sorted_profile_dirs(paths) {
         let name = dir
@@ -660,7 +662,7 @@ pub fn list_profiles(paths: &Paths) -> Vec<ProfileInfo> {
         }
         let email = read_email(&device);
         let has_app_session = dir.join("claude-app-data").exists();
-        let has_monitor = has_monitor_for(paths, &dir, &email);
+        let has_monitor = read_profile_monitor(&dir).is_some() || root_map.contains_key(&email);
         out.push(ProfileInfo {
             name,
             email,

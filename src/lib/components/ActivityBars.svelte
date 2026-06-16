@@ -3,7 +3,7 @@
   import { Chart } from "@antv/g2";
   import type { HeatCell } from "$lib/api";
   import { fmtTokens } from "$lib/format";
-  import { cssVar, isDarkTheme } from "$lib/theme";
+  import { cssVarReader, isDarkTheme } from "$lib/theme";
 
   type Point = HeatCell & { ts: number };
   let { points }: { points: Point[] } = $props();
@@ -27,9 +27,10 @@
   function build() {
     if (!el) return;
     const dark = isDarkTheme();
-    const accent = cssVar("--accent", "#d97757");
-    const faint = cssVar("--faint", "#6b7280");
-    const grid = cssVar("--border", "rgba(255,255,255,0.08)");
+    const v = cssVarReader();
+    const accent = v("--accent", "#d97757");
+    const faint = v("--faint", "#6b7280");
+    const grid = v("--border", "rgba(255,255,255,0.08)");
 
     chart = new Chart({
       container: el,

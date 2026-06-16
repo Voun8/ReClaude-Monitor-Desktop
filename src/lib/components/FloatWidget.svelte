@@ -2,26 +2,24 @@
   import { onMount, onDestroy } from "svelte";
   import { api, type MonitorSnapshot } from "$lib/api";
   import { fmtUsdCompact } from "$lib/format";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { dragOrClick } from "$lib/actions/dragOrClick";
+  import { fetchFloatSnapshot, getFloatIntervalMs, setupFloatWindow } from "$lib/float";
 
   let snapshot = $state<MonitorSnapshot | null>(null);
   let status = $state<"loading" | "ok" | "nocred" | "error">("loading");
   let timer: ReturnType<typeof setInterval>;
   let unlistenClose: (() => void) | undefined;
 
+  // status 归一化、badCredentials 判读与 snapshot 回写刻意留在本组件（有状态/跨进程，
+  // 与主窗口各自维护、不共享）；下沉到 $lib/float 的只有无副作用的纯拉取链。
   async function load() {
     try {
-      const email = await api.currentAccount();
-      if (!email) {
+      const res = await fetchFloatSnapshot();
+      if (res.kind === "nocred") {
         status = "nocred";
         return;
       }
-      const c = await api.getMonitorCred(email);
-      if (!c) {
-        status = "nocred";
-        return;
-      }
-      const snap = await api.refreshMonitor(c.email, c.password, c.orgId);
+      const snap = res.snapshot;
       if (snap.badCredentials) {
         status = "error";
         return;
@@ -49,50 +47,7 @@
   );
   const level = $derived(metrics?.stateLevel ?? "ok");
 
-  // 悬浮球：手动区分拖拽与点击。
-  // 不用 data-tauri-drag-region——它在 Windows 上 pointerdown 即进系统拖拽循环，
-  // 会吞掉 click 事件，导致「点好几次才打开主面板」。改为：移动超阈值才 startDragging，
-  // 未移动的 pointerup 判定为点击 → 打开主面板。
-  const appWindow = getCurrentWindow();
-  let downX = 0;
-  let downY = 0;
-  let pointerDown = false;
-  let dragging = false;
-  function onDown(e: PointerEvent) {
-    if (e.button !== 0) return;
-    pointerDown = true;
-    dragging = false;
-    downX = e.clientX;
-    downY = e.clientY;
-    // 捕获指针：之后的 move/up 一律派发到 .bubble，避免指针掠过动画水波层或
-    // pointer-events:none 的透明环时 pointerup 落在别处 → 这次点击丢失（上半圆尤其常见）。
-    try {
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    } catch {
-      /* ignore */
-    }
-  }
-  async function onMove(e: PointerEvent) {
-    if (!pointerDown || dragging) return;
-    // 阈值放宽到 8px：点击时的轻微抖动不再被误判为拖拽（否则会触发 startDragging 把这次点击吃掉）。
-    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 8) {
-      dragging = true;
-      try {
-        await appWindow.startDragging();
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  function onUp(e: PointerEvent) {
-    try {
-      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-    } catch {
-      /* ignore */
-    }
-    if (pointerDown && !dragging) api.restoreFromFloat();
-    pointerDown = false;
-  }
+  // 拖拽 vs 点击判定下沉到 use:dragOrClick；点击（未拖拽）回到主面板。
   function onKey(e: KeyboardEvent) {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
@@ -101,32 +56,10 @@
   }
 
   onMount(async () => {
-    // 悬浮窗专属：html/body 透明且不滚动（用 JS 设，避免全局 CSS 污染主窗口滚动）
-    for (const el of [document.documentElement, document.body]) {
-      el.style.setProperty("background", "transparent", "important");
-      el.style.setProperty("overflow", "hidden", "important");
-    }
-    // 跟随主面板的刷新间隔（写到 ui.json 里）；缺失或异常时回落 30s
-    let intervalMs = 30_000;
-    try {
-      const sec = await api.getRefreshSec();
-      if (sec && sec >= 5 && sec <= 3600) intervalMs = sec * 1000;
-    } catch {
-      /* ignore */
-    }
+    unlistenClose = await setupFloatWindow();
+    const intervalMs = await getFloatIntervalMs();
     load();
     timer = setInterval(load, intervalMs);
-
-    // 关闭悬浮球窗口（如 Alt+F4）= 退出整个程序；否则只销毁球、主窗口仍隐藏，反而更难退出。
-    // 日常退出走系统托盘图标：右键 →「退出程序」。
-    try {
-      unlistenClose = await appWindow.onCloseRequested((event) => {
-        event.preventDefault();
-        api.quitApp();
-      });
-    } catch {
-      /* ignore */
-    }
   });
   onDestroy(() => {
     clearInterval(timer);
@@ -137,9 +70,7 @@
 <div class="bubble-container">
   <div
     class="bubble {level}"
-    onpointerdown={onDown}
-    onpointermove={onMove}
-    onpointerup={onUp}
+    use:dragOrClick={{ onClick: () => api.restoreFromFloat() }}
     onkeydown={onKey}
     role="button"
     tabindex="0"

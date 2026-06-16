@@ -25,21 +25,17 @@
 
   const FOLLOW_MS = 10_000;
 
-  let usageReloadKey = $state(0); // 递增以触发用量页重新加载
+  let usageView = $state<UsageView | undefined>();
 
   // 头部刷新：按当前页刷新——监控页刷新额度/服务，用量页重载用量
   function headerRefresh() {
-    if (settings.view === "usage") usageReloadKey++;
+    if (settings.view === "usage") usageView?.reload();
     else refreshAll();
-  }
-
-  function openCredsForCurrent() {
-    openModal({ kind: "creds", profileName: null, email: monitor.currentEmail ?? "" });
   }
 
   function onSettingsSaved(apiChanged: boolean) {
     if (apiChanged) {
-      usageReloadKey++;
+      usageView?.reload();
       void refreshAll();
     }
   }
@@ -130,7 +126,7 @@
   </nav>
 
   {#if settings.view === "usage"}
-    <UsageView cred={monitor.cred} reloadKey={usageReloadKey} onConfigure={openCredsForCurrent} />
+    <UsageView bind:this={usageView} />
   {:else}
     <MonitorView />
   {/if}

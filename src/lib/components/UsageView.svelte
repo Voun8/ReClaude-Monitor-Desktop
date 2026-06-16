@@ -1,19 +1,16 @@
 <script lang="ts">
-  import { api, type Device, type MonitorCred, type UsageStats } from "$lib/api";
+  import { api, type Device, type UsageStats } from "$lib/api";
   import { flexDate, fmtInt, fmtTokens, fmtUsd4 } from "$lib/format";
+  import { monitor, openCredsForCurrent } from "$lib/monitor.svelte";
   import Heatmap from "./Heatmap.svelte";
   import ActivityBars from "./ActivityBars.svelte";
   import { RotateCw, KeyRound, BarChart3 } from "@lucide/svelte";
 
-  let {
-    cred,
-    reloadKey = 0,
-    onConfigure,
-  }: {
-    cred: MonitorCred | null;
-    reloadKey?: number;
-    onConfigure: () => void;
-  } = $props();
+  // 数据源直读 store（cred 不再透传）；父级头部刷新通过 bind:this 调用 reload()，
+  // 取代原 reloadKey 自增信号 + reloadSeen 哨兵。
+  export function reload() {
+    loadStats();
+  }
 
   type Range = "7d" | "30d" | "all";
   let range = $state<Range>("7d");
@@ -74,6 +71,7 @@
   );
 
   async function loadDevices() {
+    const cred = monitor.cred;
     if (!cred) return;
     try {
       devices = await api.usageDevices(cred.email, cred.password);
@@ -84,6 +82,7 @@
   }
 
   async function loadStats() {
+    const cred = monitor.cred;
     if (!cred) {
       stats = null;
       return;
@@ -101,6 +100,7 @@
   }
 
   async function doSync() {
+    const cred = monitor.cred;
     if (!cred || syncing) return;
     syncing = true;
     error = null;
@@ -119,31 +119,20 @@
   // range / 设备切换属于本组件内的用户事件，在事件处理器里直接重载。
   let credKey: string | null = null;
   $effect(() => {
-    const k = cred ? cred.email : "";
+    const k = monitor.cred ? monitor.cred.email : "";
     if (k === credKey) return;
     credKey = k;
     loadDevices();
     loadStats();
   });
-
-  // 父级头部刷新按钮触发（reloadKey 递增）→ 重新加载用量（跳过首次挂载）
-  let reloadSeen = false;
-  $effect(() => {
-    void reloadKey; // 跟踪 reloadKey 变化
-    if (!reloadSeen) {
-      reloadSeen = true;
-      return;
-    }
-    loadStats();
-  });
 </script>
 
-{#if !cred}
+{#if !monitor.cred}
   <div class="need-cred">
     <KeyRound size={24} />
     <div class="nc-title">需要监控凭证</div>
     <div class="nc-sub">用量统计需要登录 API 服务，请先为当前账号配置邮箱密码。</div>
-    <button class="cta" onclick={onConfigure}><KeyRound size={15} /> 配置监控凭证</button>
+    <button class="cta" onclick={openCredsForCurrent}><KeyRound size={15} /> 配置监控凭证</button>
   </div>
 {:else}
   <div class="toolbar">
