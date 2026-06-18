@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { fly } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { AlertTriangle, PictureInPicture2, RefreshCw, Settings } from "@lucide/svelte";
   import { api } from "$lib/api";
@@ -16,6 +18,7 @@
   import Logo from "./Logo.svelte";
   import MonitorView from "./MonitorView.svelte";
   import UsageView from "./UsageView.svelte";
+  import LoadingBar from "./LoadingBar.svelte";
   import Toasts from "./Toasts.svelte";
   import SaveProfileModal from "./modals/SaveProfileModal.svelte";
   import CredsModal from "./modals/CredsModal.svelte";
@@ -26,6 +29,14 @@
   const FOLLOW_MS = 10_000;
 
   let usageView = $state<UsageView | undefined>();
+  // 用量视图的「首次/切换加载中」状态，提升到此驱动顶部加载条
+  let usageBusy = $state(false);
+
+  // 顶部加载条：仅在「当前视图尚无数据的首次/切换加载」时显示——
+  // 监控页用 refreshing && 无快照；用量页用其 busy。避免每次后台轮询都闪一下。
+  const isLoading = $derived(
+    settings.view === "usage" ? usageBusy : monitor.refreshing && !monitor.snapshot,
+  );
 
   // 头部刷新：按当前页刷新——监控页刷新额度/服务，用量页重载用量
   function headerRefresh() {
@@ -42,9 +53,28 @@
 
   let followTimer: ReturnType<typeof setInterval>;
   let unlistenClose: (() => void) | undefined;
+  let unlistenFocus: (() => void) | undefined;
+
+  // 托盘面板点「设置」→ open_main(settings=true) 置位后端标志；主窗口在此读取并弹设置弹窗。
+  // 主窗口此前可能从未挂载（静默/圆环模式），故不能用事件；改为挂载时 + 每次获得焦点时拉取标志。
+  async function checkPendingSettings() {
+    try {
+      if (await api.takePendingSettings()) openModal({ kind: "settings" });
+    } catch (e) {
+      console.error(e);
+    }
+  }
 
   onMount(async () => {
     await initFromBackend();
+    void checkPendingSettings();
+    try {
+      unlistenFocus = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+        if (focused) void checkPendingSettings();
+      });
+    } catch (e) {
+      console.error(e);
+    }
     applyTrayMode();
     // 圆环模式：本次挂载是 Rust 为渲染圆环而显示的主窗口 → 渲染后隐藏主窗口。
     // 悬浮球模式：球已由 Rust 显示，主窗口全程隐藏，这里只在用户点开主窗口时运行，不隐藏。
@@ -76,6 +106,7 @@
   onDestroy(() => {
     clearInterval(followTimer);
     unlistenClose?.();
+    unlistenFocus?.();
   });
 
   // 额度轮询定时器：随 refreshSec 变化重建
@@ -88,6 +119,8 @@
     return () => clearInterval(t);
   });
 </script>
+
+<LoadingBar active={isLoading} />
 
 <div class="app">
   <header>
@@ -126,9 +159,13 @@
   </nav>
 
   {#if settings.view === "usage"}
-    <UsageView bind:this={usageView} />
+    <div class="tabview" in:fly={{ y: 8, duration: 180, easing: cubicOut }}>
+      <UsageView bind:this={usageView} bind:busy={usageBusy} />
+    </div>
   {:else}
-    <MonitorView />
+    <div class="tabview" in:fly={{ y: 8, duration: 180, easing: cubicOut }}>
+      <MonitorView />
+    </div>
   {/if}
 </div>
 
@@ -152,8 +189,13 @@
     margin: 0 auto;
     padding: 16px 18px 26px;
     height: 100vh;
+    /* 隐藏滚动条（反馈改由顶部加载条承担）：滚动条不占布局宽度，内容变高也不再横跳；仍可滚轮 / 触控板滚动。 */
     overflow-y: auto;
+    scrollbar-width: none; /* Firefox */
     box-sizing: border-box;
+  }
+  .app::-webkit-scrollbar {
+    display: none; /* WebKit：隐藏滚动条，无槽位、无横跳 */
   }
   header {
     display: flex;

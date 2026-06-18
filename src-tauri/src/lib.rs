@@ -2,6 +2,7 @@
 // 业务逻辑分布在各域模块：switcher（账号切换）、monitor（HTTP）、session（监控会话/重试）、
 // ui_config（ui.json）、windows（窗口显隐）、tray（托盘与圆环循环）、forwarder（固定端口代理）。
 
+mod autostart;
 mod forwarder;
 mod monitor;
 mod session;
@@ -29,6 +30,10 @@ struct AppState {
     // 菜单栏圆环：是否激活 + 刷新间隔（秒），由 Rust 后台循环读取
     tray_active: AtomicBool,
     tray_interval: AtomicU64,
+    // 托盘面板点「设置」→ 打开主面板时由前端读取并自动弹设置弹窗
+    pending_settings: AtomicBool,
+    // 托盘面板上次隐藏时刻：toggle 时区分「失焦自动隐藏」与「用户主动再点关闭」
+    panel_hidden_at: Mutex<std::time::Instant>,
 }
 
 fn normalize_proxy_url(raw: &str) -> Option<String> {
@@ -359,9 +364,18 @@ pub fn run() {
     // 而不是再开一个进程——否则任务管理器里会堆出多个实例。
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            windows::focus_main(app);
-        }));
+        builder = builder
+            .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+                windows::focus_main(app);
+            }))
+            // 开机自启动：状态由系统持有，启用/禁用走 autostart 模块命令。
+            // 静默启动是独立开关（存 ui.json），与「是否开机拉起」无关，故无需注入启动参数。
+            .plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                None,
+            ))
+            // 托盘面板定位：缓存托盘图标位置，供面板按 TrayBottomCenter 弹在图标下方
+            .plugin(tauri_plugin_positioner::init());
     }
 
     builder
@@ -377,6 +391,8 @@ pub fn run() {
             cookies: Mutex::new(HashMap::new()),
             tray_active: AtomicBool::new(false),
             tray_interval: AtomicU64::new(30),
+            pending_settings: AtomicBool::new(false),
+            panel_hidden_at: Mutex::new(std::time::Instant::now()),
         })
         .setup(|app| {
             // 固定端口转发器：在 daemon 动态端口前架一个稳定代理端口，支撑账号热切换
@@ -387,20 +403,35 @@ pub fn run() {
             }
             tray::init(app)?;
 
-            // 启动按上次模式：圆环 → Rust 自取数据 + tiny-skia 自绘（主窗口全程隐藏、零闪烁）；
-            // 悬浮球 → Rust 显示球（球用自己 webview 渲染）。
-            // 首次启动（无 ui.json，或主目录无法解析）：直接打开主窗口——
-            // 否则新用户只看到屏幕中央一个不在任务栏的小悬浮球，会误以为「没有任何界面」。
+            // 托盘面板：透明背景 + 失焦自动隐藏（仿菜单栏 popover：点击面板外即关闭）
+            if let Some(panel) = app.get_webview_window(windows::WIN_PANEL) {
+                let _ = panel.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+                let app_handle = app.handle().clone();
+                let panel_ref = panel.clone();
+                panel.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Focused(false) = event {
+                        windows::hide_panel(&app_handle, &panel_ref);
+                    }
+                });
+            }
+
+            // 启动形态由「最小化方式 + 静默开关」共同决定：
+            //   圆环模式 → 开启后台圆环绘制；并立即把托盘画成占位环（避免冷启动时首拉数据未就绪、
+            //   菜单栏停在默认 App 图标、与设置里「圆环」不一致——拉到真实数据后自动替换成带百分比的环）。
+            //   静默关 / 首次启动 → 显示主窗口（首次启动让新用户看到界面，不会只剩屏幕中央一个悬浮球）。
+            //   静默开 + 悬浮球 → 仅显示悬浮球；静默开 + 圆环 → 什么都不弹，仅菜单栏圆环。
             let first_run = ui_config::path().map(|p| !p.exists()).unwrap_or(true);
             let (mode, size) = ui_config::startup_mode();
-            if first_run {
-                windows::focus_main(app.handle());
-            } else if mode == "tray" {
-                // 托盘常驻可见，这里只需开启后台圆环绘制
+            let silent = ui_config::silent_start();
+            if mode == "tray" {
                 app.state::<AppState>()
                     .tray_active
                     .store(true, Ordering::Relaxed);
-            } else {
+                tray::show_loading_ring(app.handle());
+            }
+            if first_run || !silent {
+                windows::focus_main(app.handle());
+            } else if mode == "ball" {
                 windows::show_float_window(app.handle(), size);
             }
 
@@ -428,10 +459,14 @@ pub fn run() {
             windows::resize_float,
             windows::hide_main,
             windows::quit_app,
+            windows::open_main,
+            windows::take_pending_settings,
             ui_config::save_ui_config,
             ui_config::get_refresh_sec,
             ui_config::get_api_base,
             tray::set_tray_mode,
+            autostart::get_autostart,
+            autostart::set_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -55,6 +55,10 @@ export const settings = $state({
   view: (lsStr("view", "monitor") === "usage" ? "usage" : "monitor") as View,
   // 切换账号时只换凭证、不自动打开桌面 App
   noApp: lsStr("noApp", "1") === "1",
+  // 静默启动：启动直接进后台指示器（圆环/悬浮球）不弹主窗口（localStorage 镜像，默认开，与后端 silent.unwrap_or(true) 一致）
+  silentStart: lsStr("silentStart", "1") === "1",
+  // 开机自启动：状态由系统持有，initFromBackend 查询刷新（不进 localStorage，避免与系统真值漂移）
+  autostart: false,
 });
 
 export function setView(v: View) {
@@ -84,6 +88,8 @@ export interface SettingsDraft {
   floatSize: number;
   apiBase: string;
   closeAction: CloseAction;
+  silentStart: boolean;
+  autostart: boolean;
 }
 
 export function saveSettings(
@@ -107,11 +113,23 @@ export function saveSettings(
   settings.floatSize = size;
   settings.apiBase = nextApiBase;
   settings.closeAction = draft.closeAction;
+  settings.silentStart = draft.silentStart;
   lsSet("refreshSec", String(sec));
   lsSet("floatMode", settings.floatMode);
   lsSet("floatSize", String(size));
   lsSet("apiBase", nextApiBase || null);
   lsSet("closeAction", settings.closeAction);
+  lsSet("silentStart", settings.silentStart ? "1" : "0");
+  // 开机自启动：系统真值，变了才写；乐观更新 UI，失败回滚并提示
+  if (draft.autostart !== settings.autostart) {
+    const want = draft.autostart;
+    const prev = settings.autostart;
+    settings.autostart = want;
+    api.setAutostart(want).catch((e) => {
+      settings.autostart = prev;
+      toast(`开机自启设置失败：${e}`, "err");
+    });
+  }
   // 若悬浮球当前可见，立即按新尺寸调整
   api.resizeFloat(size).catch((e) => console.error(e));
   persistUiConfig();
@@ -119,20 +137,21 @@ export function saveSettings(
   return { ok: true, apiChanged };
 }
 
-// 持久化到 ui.json 供下次启动时 Rust 读取（refreshSec 同步给悬浮球）
+// 持久化到 ui.json 供下次启动时 Rust 读取（refreshSec 同步给悬浮球，silent 决定下次启动是否弹主窗口）
 export function persistUiConfig() {
   api
-    .saveUiConfig(settings.floatMode, settings.floatSize, settings.refreshSec, settings.apiBase)
+    .saveUiConfig(settings.floatMode, settings.floatSize, settings.refreshSec, settings.apiBase, settings.silentStart)
     .catch((e) => console.error(e));
 }
 
-// 启动时以 Rust 端 ui.json 为准同步 apiBase（localStorage 仅作镜像），
+// 启动时以 Rust 端 ui.json 为准同步 apiBase（localStorage 仅作镜像）、查询系统开机自启状态，
 // 并把当前设置写回供悬浮球/下次启动读取。
 export async function initFromBackend() {
   try {
     settings.apiBase = await api.getApiBase();
     lsSet("apiBase", settings.apiBase || null);
-    await api.saveUiConfig(settings.floatMode, settings.floatSize, settings.refreshSec, settings.apiBase);
+    settings.autostart = await api.getAutostart();
+    await api.saveUiConfig(settings.floatMode, settings.floatSize, settings.refreshSec, settings.apiBase, settings.silentStart);
   } catch (e) {
     console.error(e);
   }

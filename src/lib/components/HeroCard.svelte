@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { fade } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import { Clock, KeyRound, LogIn, Wallet } from "@lucide/svelte";
   import {
     fmtCountdown,
@@ -92,38 +94,40 @@
 
     {#if monitor.snapshot?.quota}
       {@const q = monitor.snapshot.quota}
-      <div class="gauge-wrap">
-        <Gauge
-          ratio={q.ratio}
-          big={`${q.pct.toFixed(0)}%`}
-          small="已用"
-          color={quotaColor(q.ratio)}
-        />
-      </div>
-      <div class="amount">{fmtUsd(q.usedUsd)} <span class="of">/ {fmtUsd(q.totalUsd)}</span></div>
-      <div class="meta">
-        <div class="m">
-          <Wallet size={14} />
-          <span>剩余 <b style="color:var(--ok)">{fmtUsd(q.remainingUsd)}</b></span>
+      <div class="quota" in:fade={{ duration: 240, easing: cubicOut }}>
+        <div class="gauge-wrap">
+          <Gauge
+            ratio={q.ratio}
+            big={`${q.pct.toFixed(0)}%`}
+            small="已用"
+            color={quotaColor(q.ratio)}
+          />
         </div>
-        {#if resetText}
+        <div class="amount">{fmtUsd(q.usedUsd)} <span class="of">/ {fmtUsd(q.totalUsd)}</span></div>
+        <div class="meta">
           <div class="m">
-            <Clock size={14} />
-            <span><b>{resetText}</b> 后重置</span>
+            <Wallet size={14} />
+            <span>剩余 <b style="color:var(--ok)">{fmtUsd(q.remainingUsd)}</b></span>
+          </div>
+          {#if resetText}
+            <div class="m">
+              <Clock size={14} />
+              <span><b>{resetText}</b> 后重置</span>
+            </div>
+          {/if}
+        </div>
+        {#if monitor.snapshot.metrics}
+          {@const m = monitor.snapshot.metrics}
+          <div class="service">
+            <span class="sdot {m.stateLevel}"></span>
+            <span class="stext">服务{m.stateText}</span>
+            <span class="sep">·</span>
+            <span>错误率 <b>{m.errorRatePct.toFixed(2)}%</b></span>
+            <span class="sep">·</span>
+            <span>延迟 <b>{fmtMs(m.avgLatencyMs)}</b></span>
           </div>
         {/if}
       </div>
-      {#if monitor.snapshot.metrics}
-        {@const m = monitor.snapshot.metrics}
-        <div class="service">
-          <span class="sdot {m.stateLevel}"></span>
-          <span class="stext">服务{m.stateText}</span>
-          <span class="sep">·</span>
-          <span>错误率 <b>{m.errorRatePct.toFixed(2)}%</b></span>
-          <span class="sep">·</span>
-          <span>延迟 <b>{fmtMs(m.avgLatencyMs)}</b></span>
-        </div>
-      {/if}
     {:else}
       <div class="hero-config">
         <div class="hc-msg">{heroMessage}</div>

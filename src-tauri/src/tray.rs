@@ -15,6 +15,10 @@ pub const TRAY_ID: &str = "ring";
 const MIN_INTERVAL_SECS: u64 = 5;
 /// 拉取失败时的指数退避上限
 const BACKOFF_MAX_SECS: u64 = 300;
+/// 冷启动（还没成功渲染过真实圆环）时的快速重试间隔（秒）
+const COLD_START_RETRY_SECS: u64 = 5;
+/// 冷启动快速重试的最多次数（约 COLD_START_RETRY_SECS × 次数 ≈ 2 分钟），之后回落指数退避
+const COLD_START_MAX_TRIES: u32 = 24;
 
 /// 构建常驻托盘图标：任何模式（悬浮球 / 圆环 / 主窗口）都能从这里退出。
 /// 左键 → 还原主窗口；右键 → 菜单「打开主面板 / 退出程序」。
@@ -40,13 +44,17 @@ pub fn init(app: &tauri::App) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
+            let app = tray.app_handle();
+            // 缓存托盘图标位置，供面板 TrayBottomCenter 定位（点击 / 移动都会刷新）
+            tauri_plugin_positioner::on_tray_event(app, &event);
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
             } = event
             {
-                focus_main(tray.app_handle());
+                // 左键：在图标下方弹出 / 收起紧凑面板（右键菜单仍可「打开主面板 / 退出」）
+                crate::windows::toggle_panel(app);
             }
         })
         .build(app)?;
@@ -72,6 +80,17 @@ fn tray_icon_size(app: &tauri::AppHandle) -> u32 {
     {
         let _ = app;
         44
+    }
+}
+
+/// 立即把托盘图标渲染成占位「加载中」环（同步、极轻量：仅画一条轨道圆）。
+/// 进入圆环模式时调用——避免菜单栏停在默认 App 图标、与设置里「圆环」不一致，
+/// 直到后台循环拉到真实数据后替换成带百分比的环。
+pub fn show_loading_ring(app: &tauri::AppHandle) {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let size = tray_icon_size(app);
+        let rgba = tray_ring::render_loading(size);
+        let _ = tray.set_icon(Some(Image::new_owned(rgba, size, size)));
     }
 }
 
@@ -125,11 +144,15 @@ pub fn set_tray_mode(
     active: bool,
     interval: u64,
 ) -> Result<(), String> {
-    state.tray_active.store(active, Ordering::Relaxed);
+    let was_active = state.tray_active.swap(active, Ordering::Relaxed);
     state
         .tray_interval
         .store(interval.max(MIN_INTERVAL_SECS), Ordering::Relaxed);
     if active {
+        // 刚从非圆环切进圆环：先上占位环，避免短暂停留在默认图标；已在圆环模式则不动，避免覆盖真实环造成闪烁。
+        if !was_active {
+            show_loading_ring(&app);
+        }
         // 切到圆环模式时立刻渲染一次圆环，避免「切了但图标半天不变成圆环」：
         // 之前只靠后台循环 tick + 首次登录，无缓存 cookie 时要等数秒，首登失败还会退避到 5 分钟。
         let app = app.clone();
@@ -151,6 +174,9 @@ pub fn set_tray_mode(
 pub fn spawn_ring_loop(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut fail_count: u32 = 0;
+        // 是否成功渲染过真实圆环：冷启动首拉常因网络/daemon 未就绪而失败，
+        // 在首次成功前用快速重试（而非指数退避），让真实百分比环尽快替换占位环。
+        let mut ever_ok = false;
         loop {
             let (active, interval) = {
                 let s = app_handle.state::<AppState>();
@@ -168,15 +194,21 @@ pub fn spawn_ring_loop(app_handle: tauri::AppHandle) {
             }
             let sleep_secs = if refresh_tray_icon(&app_handle).await {
                 fail_count = 0;
+                ever_ok = true;
                 interval
             } else {
                 fail_count = fail_count.saturating_add(1);
-                // 退避：interval × 2^min(fail,5)，上限 BACKOFF_MAX_SECS
-                let mult = 1u64 << fail_count.min(5);
-                interval
-                    .saturating_mul(mult)
-                    .min(BACKOFF_MAX_SECS)
-                    .max(interval)
+                if !ever_ok && fail_count <= COLD_START_MAX_TRIES {
+                    // 冷启动还没拉到过数据：短间隔快速重试（占位环已先上屏，这里只为尽快出真实百分比）
+                    COLD_START_RETRY_SECS
+                } else {
+                    // 稳态偶发失败：指数退避 interval × 2^min(fail,5)，上限 BACKOFF_MAX_SECS，避免高频撞 API
+                    let mult = 1u64 << fail_count.min(5);
+                    interval
+                        .saturating_mul(mult)
+                        .min(BACKOFF_MAX_SECS)
+                        .max(interval)
+                }
             };
             tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
         }

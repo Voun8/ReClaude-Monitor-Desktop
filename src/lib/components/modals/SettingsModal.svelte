@@ -22,6 +22,8 @@
     floatSize: settings.floatSize,
     apiBase: settings.apiBase,
     closeAction: settings.closeAction,
+    silentStart: settings.silentStart,
+    autostart: settings.autostart,
   });
 
   const PRESETS = [10, 30, 60, 300];
@@ -81,6 +83,25 @@
       <button class="preset" class:on={draft.closeAction === "background"} onclick={() => (draft.closeAction = "background")}>后台运行</button>
     </div>
   </div>
+
+  <div class="field set-sep">
+    <div class="seg-title">开机自启动</div>
+    <div class="presets">
+      <button class="preset" class:on={draft.autostart} onclick={() => (draft.autostart = true)}>开启</button>
+      <button class="preset" class:on={!draft.autostart} onclick={() => (draft.autostart = false)}>关闭</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <div class="seg-title">静默启动</div>
+    <div class="presets">
+      <button class="preset" class:on={draft.silentStart} onclick={() => (draft.silentStart = true)}>开启</button>
+      <button class="preset" class:on={!draft.silentStart} onclick={() => (draft.silentStart = false)}>关闭</button>
+    </div>
+  </div>
+  <p class="hint">
+    开机自启动登记到系统登录项。静默启动开启时，启动直接进{draft.floatMode === "tray" ? "菜单栏圆环" : "悬浮球"}、不弹主窗口（首次启动除外）；关闭则启动显示主窗口。
+  </p>
 
   <div class="modal-foot">
     <button class="primary" onclick={confirm}>保存</button>

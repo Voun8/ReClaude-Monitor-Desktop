@@ -56,6 +56,61 @@ fn font() -> Option<&'static FontVec> {
     FONT.get_or_init(load_font).as_ref()
 }
 
+/// 环几何（半径、线宽、轨道透明度）：Windows 更细更大（内圈大、数字能放大）；其它平台沿用原值。
+/// render_ring 与 render_loading 共用，确保占位环与真实环尺寸一致。
+fn ring_metrics(size: u32) -> (f32, f32, u8) {
+    let s = size as f32;
+    #[cfg(target_os = "windows")]
+    {
+        (s * 0.42, s * 0.09, 80)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        (s * 0.38, s * 0.13, 56)
+    }
+}
+
+/// tiny-skia 内部是预乘 alpha；托盘需要直通 → 反预乘后取出 RGBA 字节。
+fn into_straight_rgba(pm: Pixmap) -> Vec<u8> {
+    let mut out = pm.take();
+    for px in out.chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 0 || a == 255 {
+            continue;
+        }
+        let a_u = a as u32;
+        px[0] = ((px[0] as u32 * 255 + a_u / 2) / a_u).min(255) as u8;
+        px[1] = ((px[1] as u32 * 255 + a_u / 2) / a_u).min(255) as u8;
+        px[2] = ((px[2] as u32 * 255 + a_u / 2) / a_u).min(255) as u8;
+    }
+    out
+}
+
+/// 占位「加载中」环：只画轨道圆（无进度弧、无数字），轨道描得比常态更明显，单独出现也看得清是个环。
+/// 进入圆环模式但还没拉到真实额度时上屏——让菜单栏立刻是环形而非默认 App 图标，拉到数据后再换成带百分比的环。
+pub fn render_loading(size: u32) -> Vec<u8> {
+    let size = size.max(8);
+    let mut pm = Pixmap::new(size, size).expect("pixmap");
+    pm.fill(Color::TRANSPARENT);
+    let cx = size as f32 / 2.0;
+    let cy = size as f32 / 2.0;
+    let (r, lw, _) = ring_metrics(size);
+
+    let mut pb = PathBuilder::new();
+    pb.push_circle(cx, cy, r);
+    let path = pb.finish().unwrap();
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(255, 255, 255, 110);
+    paint.anti_alias = true;
+    let stroke = Stroke {
+        width: lw,
+        ..Stroke::default()
+    };
+    pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+
+    into_straight_rgba(pm)
+}
+
 /// 画圆环（轨道 + 进度弧）+ 中间百分比。avail = 0..100（剩余可用%），size = 目标像素边长。
 pub fn render_ring(avail: f64, color_rgb: (u8, u8, u8), size: u32) -> Vec<u8> {
     let size = size.max(8);
@@ -65,11 +120,8 @@ pub fn render_ring(avail: f64, color_rgb: (u8, u8, u8), size: u32) -> Vec<u8> {
     let cx = size as f32 / 2.0;
     let cy = size as f32 / 2.0;
 
-    // 环几何 + 轨道透明度：Windows 更细更大（内圈大、数字能放大）；其它平台沿用原值
-    #[cfg(target_os = "windows")]
-    let (r, lw, track_alpha) = (size as f32 * 0.42, size as f32 * 0.09, 80u8);
-    #[cfg(not(target_os = "windows"))]
-    let (r, lw, track_alpha) = (size as f32 * 0.38, size as f32 * 0.13, 56u8);
+    // 环几何 + 轨道透明度（见 ring_metrics，与占位环共用）
+    let (r, lw, track_alpha) = ring_metrics(size);
 
     // 轨道圆（白，半透明——比进度弧弱但需看得出整圈，弧才有"剩多少"的参照）
     {
@@ -201,17 +253,5 @@ pub fn render_ring(avail: f64, color_rgb: (u8, u8, u8), size: u32) -> Vec<u8> {
         }
     }
 
-    // tiny-skia 内部是预乘 alpha；托盘需要直通 → 反预乘
-    let mut out = pm.take();
-    for px in out.chunks_exact_mut(4) {
-        let a = px[3];
-        if a == 0 || a == 255 {
-            continue;
-        }
-        let a_u = a as u32;
-        px[0] = ((px[0] as u32 * 255 + a_u / 2) / a_u).min(255) as u8;
-        px[1] = ((px[1] as u32 * 255 + a_u / 2) / a_u).min(255) as u8;
-        px[2] = ((px[2] as u32 * 255 + a_u / 2) / a_u).min(255) as u8;
-    }
-    out
+    into_straight_rgba(pm)
 }

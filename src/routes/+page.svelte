@@ -1,21 +1,27 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import FloatWidget from "$lib/components/FloatWidget.svelte";
+  import PanelWidget from "$lib/components/PanelWidget.svelte";
   import MainPanel from "$lib/components/MainPanel.svelte";
 
-  // 悬浮球窗口与主面板共用本路由，按 Tauri 窗口 label 分流
-  function detectFloat(): boolean {
+  // 悬浮球 / 托盘面板 / 主面板共用本路由，按 Tauri 窗口 label 分流
+  function detectWindow(): "float" | "panel" | "main" {
     try {
-      return getCurrentWindow().label === "float";
+      const l = getCurrentWindow().label;
+      if (l === "float") return "float";
+      if (l === "panel") return "panel";
+      return "main";
     } catch {
-      return false;
+      return "main";
     }
   }
-  const isFloat = detectFloat();
+  const win = detectWindow();
 </script>
 
-{#if isFloat}
+{#if win === "float"}
   <FloatWidget />
+{:else if win === "panel"}
+  <PanelWidget />
 {:else}
   <MainPanel />
 {/if}

@@ -132,10 +132,23 @@ export const api = {
   resizeFloat: (size: number) => invoke<void>("resize_float", { size }),
   hideMain: () => invoke<void>("hide_main"),
   quitApp: () => invoke<void>("quit_app"),
-  saveUiConfig: (mode: string, size: number, refreshSec?: number, apiBase?: string) =>
-    invoke<void>("save_ui_config", { mode, size, refreshSec: refreshSec ?? null, apiBase: apiBase ?? null }),
+  // 托盘面板 →「打开主面板」(settings=true 时同时弹设置弹窗)
+  openMain: (settings: boolean) => invoke<void>("open_main", { settings }),
+  // 主窗口读取并清除「待打开设置」标志
+  takePendingSettings: () => invoke<boolean>("take_pending_settings"),
+  saveUiConfig: (mode: string, size: number, refreshSec?: number, apiBase?: string, silent?: boolean) =>
+    invoke<void>("save_ui_config", {
+      mode,
+      size,
+      refreshSec: refreshSec ?? null,
+      apiBase: apiBase ?? null,
+      silent: silent ?? null,
+    }),
   getRefreshSec: () => invoke<number | null>("get_refresh_sec"),
   getApiBase: () => invoke<string>("get_api_base"),
   setTrayMode: (active: boolean, interval: number) =>
     invoke<void>("set_tray_mode", { active, interval }),
+  // 开机自启动：状态由系统持有，get 查询、set 启用/禁用
+  getAutostart: () => invoke<boolean>("get_autostart"),
+  setAutostart: (enable: boolean) => invoke<void>("set_autostart", { enable }),
 };

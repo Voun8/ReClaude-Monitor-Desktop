@@ -1,9 +1,14 @@
-// 主窗口 / 悬浮球窗口的显隐控制。窗口 label 与 tauri.conf.json 的 windows 定义对应。
+// 主窗口 / 悬浮球 / 托盘面板窗口的显隐控制。窗口 label 与 tauri.conf.json 的 windows 定义对应。
 
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 use tauri::Manager;
+
+use crate::AppState;
 
 pub const WIN_MAIN: &str = "main";
 pub const WIN_FLOAT: &str = "float";
+pub const WIN_PANEL: &str = "panel";
 
 /// 还原并聚焦主窗口——托盘左键/菜单、二次启动、悬浮球点击共用。
 pub fn focus_main(app: &tauri::AppHandle) {
@@ -86,4 +91,62 @@ pub fn hide_main(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+// ============ 托盘面板（菜单栏 popover）============
+
+/// 托盘面板：在托盘图标下方弹出的紧凑信息面板（仿菜单栏 popover）。
+/// 失焦自动隐藏；再次点击托盘时若刚因失焦隐藏（<250ms）则视为「关闭」，实现稳定 toggle，
+/// 避免点击托盘先触发失焦隐藏、随后又被重新弹出的闪烁。
+pub fn toggle_panel(app: &tauri::AppHandle) {
+    let Some(p) = app.get_webview_window(WIN_PANEL) else {
+        return;
+    };
+    if p.is_visible().unwrap_or(false) {
+        hide_panel(app, &p);
+        return;
+    }
+    let recently_hidden = app
+        .state::<AppState>()
+        .panel_hidden_at
+        .lock()
+        .unwrap()
+        .elapsed()
+        < Duration::from_millis(250);
+    if recently_hidden {
+        return;
+    }
+    // 依据托盘事件缓存的图标位置，把面板放到图标正下方居中（tray-icon 特性，跨平台）
+    use tauri_plugin_positioner::{Position, WindowExt};
+    let _ = p.move_window(Position::TrayBottomCenter);
+    let _ = p.show();
+    let _ = p.set_focus();
+}
+
+/// 隐藏托盘面板并记录隐藏时刻（供 toggle 的失焦竞态防抖）。
+pub fn hide_panel(app: &tauri::AppHandle, p: &tauri::WebviewWindow) {
+    *app.state::<AppState>().panel_hidden_at.lock().unwrap() = Instant::now();
+    let _ = p.hide();
+}
+
+/// 从托盘面板打开完整主面板；settings=true 时附带打开设置弹窗
+/// （经 pending 标志，主窗口挂载 / 聚焦时读取——主窗口此前可能从未挂载、无法直接收事件）。
+#[tauri::command]
+pub fn open_main(app: tauri::AppHandle, settings: bool) -> Result<(), String> {
+    if let Some(p) = app.get_webview_window(WIN_PANEL) {
+        hide_panel(&app, &p);
+    }
+    if settings {
+        app.state::<AppState>()
+            .pending_settings
+            .store(true, Ordering::Relaxed);
+    }
+    focus_main(&app);
+    Ok(())
+}
+
+/// 主窗口读取并清除「待打开设置」标志（面板点设置 → 打开主面板时自动弹设置）。
+#[tauri::command]
+pub fn take_pending_settings(state: tauri::State<'_, AppState>) -> bool {
+    state.pending_settings.swap(false, Ordering::Relaxed)
 }

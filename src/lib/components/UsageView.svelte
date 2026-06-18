@@ -1,10 +1,15 @@
 <script lang="ts">
+  import { fade } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import { api, type Device, type UsageStats } from "$lib/api";
   import { flexDate, fmtInt, fmtTokens, fmtUsd4 } from "$lib/format";
   import { monitor, openCredsForCurrent } from "$lib/monitor.svelte";
   import Heatmap from "./Heatmap.svelte";
   import ActivityBars from "./ActivityBars.svelte";
   import { RotateCw, KeyRound, BarChart3 } from "@lucide/svelte";
+
+  // busy 提升给父级 MainPanel 驱动顶部加载条：首次/切换加载中且尚无数据时为 true
+  let { busy = $bindable(false) }: { busy?: boolean } = $props();
 
   // 数据源直读 store（cred 不再透传）；父级头部刷新通过 bind:this 调用 reload()，
   // 取代原 reloadKey 自增信号 + reloadSeen 哨兵。
@@ -125,6 +130,11 @@
     loadDevices();
     loadStats();
   });
+
+  // 同步顶部加载条状态：加载中且尚无数据（后台静默刷新不触发，避免顶部条频繁闪烁）
+  $effect(() => {
+    busy = loading && !stats;
+  });
 </script>
 
 {#if !monitor.cred}
@@ -177,6 +187,7 @@
   {:else if !stats && loading}
     <div class="msg">加载中…</div>
   {:else if stats}
+    <div class="stats-in" in:fade={{ duration: 220, easing: cubicOut }}>
     <div class="kpis">
       {#each kpis as k}
         <div class="kpi">
@@ -216,6 +227,7 @@
         </div>
       </div>
     {/if}
+    </div>
   {:else}
     <div class="msg">暂无数据</div>
   {/if}
@@ -268,7 +280,12 @@
   .dev {
     appearance: none;
     -webkit-appearance: none;
-    max-width: 52%;
+    /* 固定宽度：select 默认按最宽选项自适应，设备列表加载后会变宽导致横跳；固定后稳定 */
+    flex: 0 0 52%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     padding: 9px 32px 9px 13px;
     border-radius: 11px;
     background-color: var(--surface);

@@ -1,6 +1,6 @@
 {
   "name": "reclaude-monitor",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "Reclaude 控制台 - 账号热切换 + 拼车额度监控的桌面 App (Tauri 2 + SvelteKit)",
   "type": "module",
   "scripts": {

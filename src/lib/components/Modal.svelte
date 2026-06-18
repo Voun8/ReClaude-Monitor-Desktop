@@ -51,6 +51,11 @@
   .dialog {
     width: 100%;
     max-width: 380px;
+    /* 固定窗口大小：弹窗最高不超过视口（减去 overlay 上下各 20px 内边距），
+       超高时由 .body 内部滚动，而不是把弹窗撑出窗口、裁掉首尾（含保存按钮）。 */
+    max-height: calc(100vh - 40px);
+    display: flex;
+    flex-direction: column;
     background: var(--surface);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
@@ -74,6 +79,7 @@
     justify-content: space-between;
     padding: 14px 16px;
     border-bottom: 1px solid var(--border);
+    flex-shrink: 0; /* 头部固定，标题不随 body 滚动 */
   }
   .title {
     font-size: 14.5px;
@@ -94,6 +100,9 @@
   }
   .body {
     padding: 16px;
+    overflow-y: auto; /* 内容超高时滚动，配合 .dialog 的 max-height 固定窗口 */
+    scrollbar-gutter: stable; /* 始终预留滚动条槽位，内容高度变化时不横跳 */
+    overscroll-behavior: contain;
   }
 
   /* 弹窗表单的公共词汇表（field / cbox / modal-foot / hint / confirm），
