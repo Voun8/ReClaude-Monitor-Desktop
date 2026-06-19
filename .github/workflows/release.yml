@@ -98,6 +98,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 需完整历史，才能把提交快进推送到 Gitee（浅克隆会报 shallow update not allowed）
+
+      # Gitee 镜像不会自动跟随 GitHub。下方 create_release 会在 gitee_target_commitish(=github.sha)
+      # 上创建 tag，而该提交必须先存在于 Gitee，否则报「创建标签失败：vX.Y.Z」。
+      # 这里先把当前 tag 指向的提交快进到 Gitee 的 main，再交给下方步骤建 tag。
+      # 依赖 Secret：GITEE_TOKEN —— 须为对 vvvon/re-claude-monitor-desktop 有 push 权限的私人令牌（projects 权限）。
+      - name: Push tag commit to Gitee
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          git push "https://vvvon:${GITEE_TOKEN}@gitee.com/vvvon/re-claude-monitor-desktop.git" HEAD:refs/heads/main
 
       - name: Download bundle artifacts
         uses: actions/download-artifact@v4
