@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.8] - 2026-06-19
+
+### 修复
+
+- 菜单栏面板黑色底色：macOS 透明窗口需在「显示时」经过一次真实重绘，透明背景才会生效；而面板尺寸固定、显示时从不 resize（不同于悬浮球每次显示都 set_size），导致透明未被「冲」出来、露出不透明黑底。现面板显示前（窗口仍隐藏）强制微调尺寸 1px 再复位以触发重绘，并重设透明背景色，黑底消除。
+
+### 优化
+
+- 菜单栏面板卡片投影调淡（`box-shadow` 透明度 0.4 → 0.12、向下偏移 10px → 4px）：避免在浅色背景上于卡片下沿压出一条明显灰带、被误认为「黑底」（卡片已有 1px 描边做分隔）。
+
 ## [1.1.7] - 2026-06-19
 
 ### 新增

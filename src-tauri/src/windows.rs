@@ -116,6 +116,19 @@ pub fn toggle_panel(app: &tauri::AppHandle) {
     if recently_hidden {
         return;
     }
+    // 透明面板显示前的两步（与悬浮球 show_float_window 对齐，缺一不可）：
+    // 1) 重设透明背景色；
+    // 2) 强制一次真实 resize 触发重绘——macOS 上透明窗口必须经一次重绘透明才生效（tauri#10306）。
+    //    悬浮球每次显示都 set_size 故始终透明；面板尺寸固定、显示时从不 resize，透明背景没被「冲」
+    //    出来，露出不透明黑底，正是面板黑色底色的根因。在 show 前（窗口仍隐藏）微调 1px 再复位，
+    //    无可见跳动；resizable=false 会把 min=max 锁死，需临时放开（同 set_float_size）。
+    let _ = p.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+    if let Ok(sz) = p.inner_size() {
+        let _ = p.set_resizable(true);
+        let _ = p.set_size(tauri::PhysicalSize::new(sz.width, sz.height + 1));
+        let _ = p.set_size(sz);
+        let _ = p.set_resizable(false);
+    }
     // 依据托盘事件缓存的图标位置，把面板放到图标正下方居中（tray-icon 特性，跨平台）
     use tauri_plugin_positioner::{Position, WindowExt};
     let _ = p.move_window(Position::TrayBottomCenter);

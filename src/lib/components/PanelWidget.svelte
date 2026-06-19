@@ -179,7 +179,8 @@
     background: var(--surface);
     border: 1px solid var(--border-strong);
     border-radius: 14px;
-    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.4);
+    /* 轻量浮层阴影：低透明度 + 小偏移，避免在浅色背景上压出一条像「黑底」的灰带（卡片本身有 1px 描边做分隔）。 */
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
     overflow: hidden;
   }
 
