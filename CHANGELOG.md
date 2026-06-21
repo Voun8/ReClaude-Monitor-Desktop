@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.9] - 2026-06-21
+
+### 修复
+
+- Windows 左键点击托盘弹出的菜单栏面板位置错误（面板跌出屏幕底部 / 被任务栏遮住，即「显示不正确」）：原用 `TrayBottomCenter` 定位，会把面板顶边钉在托盘图标处向下展开——macOS 菜单栏在屏幕顶部时正常，但 Windows 任务栏在底部，导致整块面板落到屏幕外。现改用 `TrayCenter`，将面板置于图标上方、正好落在任务栏之上；macOS 经插件 `y<0` 回退至原行为，无回归。并新增：当托盘图标贴近屏幕右缘时，把面板水平夹回所在显示器范围内，避免右侧溢出。
+
 ## [1.1.8] - 2026-06-19
 
 ### 修复

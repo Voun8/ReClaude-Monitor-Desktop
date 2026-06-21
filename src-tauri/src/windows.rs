@@ -129,9 +129,26 @@ pub fn toggle_panel(app: &tauri::AppHandle) {
         let _ = p.set_size(sz);
         let _ = p.set_resizable(false);
     }
-    // 依据托盘事件缓存的图标位置，把面板放到图标正下方居中（tray-icon 特性，跨平台）
+    // 依据托盘事件缓存的图标位置定位面板（tray-icon 特性，跨平台）。
+    // 用 TrayCenter 而非 TrayBottomCenter：后者把面板顶边钉在图标处往下展开——
+    // macOS 菜单栏在顶部尚可，但 Windows 任务栏在底部，会让面板整块跌出屏幕底部/被任务栏遮住（即「显示不正确」）。
+    // TrayCenter 默认把面板放到图标上方（y = tray_y − 高度）：Windows 正好落在任务栏上方；
+    // macOS 上 y<0 触发插件回退 y = tray_y，与原 TrayBottomCenter 行为一致，无回归。
     use tauri_plugin_positioner::{Position, WindowExt};
-    let _ = p.move_window(Position::TrayBottomCenter);
+    let _ = p.move_window(Position::TrayCenter);
+    // Windows：托盘图标贴近屏幕右缘，居中后面板右侧可能溢出——夹回所在显示器宽度内。
+    // （positioner 2.3.2 无 move_window_constrained；仅在会溢出时纠正一次，正常居中不受影响。）
+    #[cfg(target_os = "windows")]
+    if let (Ok(Some(mon)), Ok(pos), Ok(sz)) =
+        (p.current_monitor(), p.outer_position(), p.outer_size())
+    {
+        let left = mon.position().x;
+        let max_x = (left + mon.size().width as i32 - sz.width as i32).max(left);
+        let x = pos.x.clamp(left, max_x);
+        if x != pos.x {
+            let _ = p.set_position(tauri::PhysicalPosition::new(x, pos.y));
+        }
+    }
     let _ = p.show();
     let _ = p.set_focus();
 }
