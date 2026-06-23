@@ -21,6 +21,7 @@
     floatMode: settings.floatMode,
     floatSize: settings.floatSize,
     apiBase: settings.apiBase,
+    apiKey: settings.apiKey,
     closeAction: settings.closeAction,
     silentStart: settings.silentStart,
     autostart: settings.autostart,
@@ -55,10 +56,16 @@
   <p class="hint">额度与服务指标的自动刷新频率（{REFRESH_SEC_MIN}–{REFRESH_SEC_MAX} 秒）。倒计时与跟随账号不受影响。</p>
 
   <div class="field set-sep">
-    <label for="s-api">API 根地址</label>
-    <input id="s-api" type="text" placeholder="留空使用默认地址" bind:value={draft.apiBase} />
+    <label for="s-api">中转地址</label>
+    <input id="s-api" type="text" placeholder="如 https://proxy.mortysky.top" bind:value={draft.apiBase} />
   </div>
-  <p class="hint">留空优先使用 https://www.recode.cat；不可用时依次切换到 https://www.reclaude.ai、https://reclaude.ai。填写后仅使用该地址。</p>
+  <p class="hint">中转服务地址；留空使用默认中转。上游 failover 由中转负责。</p>
+
+  <div class="field">
+    <label for="s-key">访问令牌（API Key）</label>
+    <input id="s-key" type="password" placeholder="中转为本账号签发的 Key" bind:value={draft.apiKey} />
+  </div>
+  <p class="hint">中转启用鉴权时必填，请求会带上 x-api-key 头。</p>
 
   <div class="field set-sep">
     <div class="seg-title">最小化方式</div>

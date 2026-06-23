@@ -136,16 +136,18 @@ export const api = {
   openMain: (settings: boolean) => invoke<void>("open_main", { settings }),
   // 主窗口读取并清除「待打开设置」标志
   takePendingSettings: () => invoke<boolean>("take_pending_settings"),
-  saveUiConfig: (mode: string, size: number, refreshSec?: number, apiBase?: string, silent?: boolean) =>
+  saveUiConfig: (mode: string, size: number, refreshSec?: number, apiBase?: string, silent?: boolean, apiKey?: string) =>
     invoke<void>("save_ui_config", {
       mode,
       size,
       refreshSec: refreshSec ?? null,
       apiBase: apiBase ?? null,
       silent: silent ?? null,
+      apiKey: apiKey ?? null,
     }),
   getRefreshSec: () => invoke<number | null>("get_refresh_sec"),
   getApiBase: () => invoke<string>("get_api_base"),
+  getApiKey: () => invoke<string>("get_api_key"),
   setTrayMode: (active: boolean, interval: number) =>
     invoke<void>("set_tray_mode", { active, interval }),
   // 开机自启动：状态由系统持有，get 查询、set 启用/禁用

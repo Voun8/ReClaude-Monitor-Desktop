@@ -17,13 +17,16 @@ pub struct UiConfig {
     /// 主面板设的刷新间隔（秒），供悬浮球启动时同步使用；None 表示沿用旧文件值
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_sec: Option<u64>,
-    /// 监控 API 根地址；None/空字符串表示使用默认地址并允许自动切备用域名。
+    /// 监控 API 根地址（中转域名）；None/空表示使用默认中转地址。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_base: Option<String>,
     /// 静默启动：true=启动直接进后台指示器（圆环/悬浮球）不弹主窗口。
     /// None（旧文件无此字段）按 true 处理，沿用既有「非首次启动不弹主窗口」的行为。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub silent: Option<bool>,
+    /// 中转访问令牌（x-api-key）；None/空表示不带。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 pub fn path() -> Option<std::path::PathBuf> {
@@ -73,9 +76,21 @@ pub fn normalize_api_base(raw: &str) -> Option<String> {
     Some(with_scheme.trim_end_matches('/').to_string())
 }
 
-/// 用户配置的 API 根地址；None 表示使用默认地址 + 自动备用域名。
+/// 用户配置的 API 根地址；None 表示使用默认中转地址。
 pub fn configured_api_base() -> Option<String> {
     read_raw().api_base.as_deref().and_then(normalize_api_base)
+}
+
+/// 用户配置的中转访问令牌；None 表示不带 x-api-key。
+pub fn configured_api_key() -> Option<String> {
+    read_raw().api_key.and_then(|v| {
+        let t = v.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    })
 }
 
 /// 前端在设置变化时调用，持久化供下次启动用。
@@ -87,6 +102,7 @@ pub fn save_ui_config(
     refresh_sec: Option<u64>,
     api_base: Option<String>,
     silent: Option<bool>,
+    api_key: Option<String>,
 ) -> Result<(), String> {
     let p = path().ok_or_else(|| "找不到主目录".to_string())?;
     if let Some(dir) = p.parent() {
@@ -99,12 +115,24 @@ pub fn save_ui_config(
         Some(v) => normalize_api_base(&v),
         None => old.api_base.and_then(|v| normalize_api_base(&v)),
     };
+    let merged_api_key = match api_key {
+        Some(v) => {
+            let t = v.trim().to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        }
+        None => old.api_key,
+    };
     let json = serde_json::to_string(&UiConfig {
         mode,
         size,
         refresh_sec: merged_sec,
         api_base: merged_api_base,
         silent: merged_silent,
+        api_key: merged_api_key,
     })
     .map_err(|e| e.to_string())?;
     std::fs::write(p, json).map_err(|e| e.to_string())
@@ -125,4 +153,9 @@ pub fn get_refresh_sec() -> Option<u64> {
 #[tauri::command]
 pub fn get_api_base() -> String {
     configured_api_base().unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn get_api_key() -> String {
+    configured_api_key().unwrap_or_default()
 }

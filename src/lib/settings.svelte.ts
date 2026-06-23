@@ -50,6 +50,7 @@ export const settings = $state({
   floatMode: (lsStr("floatMode", "ball") === "tray" ? "tray" : "ball") as FloatMode,
   floatSize: lsNum("floatSize", FLOAT_SIZE_DEFAULT, FLOAT_SIZE_MIN, FLOAT_SIZE_MAX),
   apiBase: lsStr("apiBase", ""),
+  apiKey: lsStr("apiKey", ""),
   // 关闭按钮行为：退出程序 或 后台运行
   closeAction: (lsStr("closeAction", "quit") === "background" ? "background" : "quit") as CloseAction,
   view: (lsStr("view", "monitor") === "usage" ? "usage" : "monitor") as View,
@@ -87,6 +88,7 @@ export interface SettingsDraft {
   floatMode: FloatMode;
   floatSize: number;
   apiBase: string;
+  apiKey: string;
   closeAction: CloseAction;
   silentStart: boolean;
   autostart: boolean;
@@ -107,17 +109,20 @@ export function saveSettings(
   if (nextApiBase === null) {
     return { ok: false, error: "API 地址格式不正确" };
   }
-  const apiChanged = settings.apiBase !== nextApiBase;
+  const nextApiKey = draft.apiKey.trim();
+  const apiChanged = settings.apiBase !== nextApiBase || settings.apiKey !== nextApiKey;
   settings.refreshSec = sec;
   settings.floatMode = draft.floatMode;
   settings.floatSize = size;
   settings.apiBase = nextApiBase;
+  settings.apiKey = nextApiKey;
   settings.closeAction = draft.closeAction;
   settings.silentStart = draft.silentStart;
   lsSet("refreshSec", String(sec));
   lsSet("floatMode", settings.floatMode);
   lsSet("floatSize", String(size));
   lsSet("apiBase", nextApiBase || null);
+  lsSet("apiKey", nextApiKey || null);
   lsSet("closeAction", settings.closeAction);
   lsSet("silentStart", settings.silentStart ? "1" : "0");
   // 开机自启动：系统真值，变了才写；乐观更新 UI，失败回滚并提示
@@ -140,7 +145,7 @@ export function saveSettings(
 // 持久化到 ui.json 供下次启动时 Rust 读取（refreshSec 同步给悬浮球，silent 决定下次启动是否弹主窗口）
 export function persistUiConfig() {
   api
-    .saveUiConfig(settings.floatMode, settings.floatSize, settings.refreshSec, settings.apiBase, settings.silentStart)
+    .saveUiConfig(settings.floatMode, settings.floatSize, settings.refreshSec, settings.apiBase, settings.silentStart, settings.apiKey)
     .catch((e) => console.error(e));
 }
 
@@ -149,9 +154,11 @@ export function persistUiConfig() {
 export async function initFromBackend() {
   try {
     settings.apiBase = await api.getApiBase();
+    settings.apiKey = await api.getApiKey();
     lsSet("apiBase", settings.apiBase || null);
+    lsSet("apiKey", settings.apiKey || null);
     settings.autostart = await api.getAutostart();
-    await api.saveUiConfig(settings.floatMode, settings.floatSize, settings.refreshSec, settings.apiBase, settings.silentStart);
+    await api.saveUiConfig(settings.floatMode, settings.floatSize, settings.refreshSec, settings.apiBase, settings.silentStart, settings.apiKey);
   } catch (e) {
     console.error(e);
   }

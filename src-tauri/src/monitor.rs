@@ -3,10 +3,19 @@
 use serde::Serialize;
 use serde_json::Value;
 
-pub const DEFAULT_API_BASE: &str = "https://www.recode.cat";
-pub const FALLBACK_API_BASE: &str = "https://www.reclaude.ai";
-pub const LEGACY_API_BASE: &str = "https://reclaude.ai";
+use crate::ui_config;
+
+// 上游 failover 已收敛到中转（reclaude-proxy），客户端只走单一中转地址。
+pub const DEFAULT_API_BASE: &str = "https://proxy.mortysky.top";
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+
+// 中转鉴权令牌（ui.json 的 api_key）：配置后所有请求带 x-api-key；留空则不带。
+fn apply_proxy_key(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    match ui_config::configured_api_key() {
+        Some(key) => rb.header("x-api-key", key),
+        None => rb,
+    }
+}
 
 fn api_url(api_base: &str, path: &str) -> String {
     format!("{api_base}{path}")
@@ -133,13 +142,14 @@ pub async fn login(
     email: &str,
     password: &str,
 ) -> Result<String, MonErr> {
-    let res = client
+    let rb = client
         .post(api_url(api_base, "/api/auth/login"))
         .header("content-type", "application/json")
         .header("accept", "application/json")
         .header("origin", api_base)
         .header("referer", format!("{api_base}/login"))
-        .header("user-agent", UA)
+        .header("user-agent", UA);
+    let res = apply_proxy_key(rb)
         .json(&serde_json::json!({ "email": email, "password": password }))
         .send()
         .await
@@ -196,12 +206,14 @@ fn with_app_headers(
     api_base: &str,
     cookie: &str,
 ) -> reqwest::RequestBuilder {
-    rb.header("accept", "*/*")
+    let rb = rb
+        .header("accept", "*/*")
         .header("accept-language", "zh-CN,zh;q=0.9")
         .header("cookie", cookie)
         .header("referer", format!("{api_base}/app"))
         .header("user-agent", UA)
-        .header("x-lang", "zh")
+        .header("x-lang", "zh");
+    apply_proxy_key(rb)
 }
 
 /// 把非 2xx 响应按状态码分类成 MonErr（RBAC 拒绝识别 + 正文截断 + 401/403 归为鉴权错）。

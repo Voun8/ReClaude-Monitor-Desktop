@@ -464,6 +464,7 @@ pub fn run() {
             ui_config::save_ui_config,
             ui_config::get_refresh_sec,
             ui_config::get_api_base,
+            ui_config::get_api_key,
             tray::set_tray_mode,
             autostart::get_autostart,
             autostart::set_autostart,
